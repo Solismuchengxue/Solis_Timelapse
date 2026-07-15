@@ -4,6 +4,7 @@ DEVLOG.md
 .claude/
 .codex/
 .worktrees/
+.superpowers/
 
 # Python/runtime files
 __pycache__/

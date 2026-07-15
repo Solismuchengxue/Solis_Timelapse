@@ -1,1 +1,1 @@
-"""Sony timelapse WebUI business modules."""
+"""Solis_Timelapse business modules."""

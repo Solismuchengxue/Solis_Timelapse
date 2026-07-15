@@ -8,6 +8,8 @@ HTML_PATH = ROOT / "webui" / "index.html"
 JS_PATH = ROOT / "webui" / "app.js"
 CSS_PATH = ROOT / "webui" / "styles.css"
 PREFS_PATH = ROOT / "webui" / "ui_prefs.js"
+README_PATH = ROOT / "README.md"
+GITIGNORE_PATH = ROOT / ".gitignore"
 
 
 class WebUiStaticContractTests(unittest.TestCase):
@@ -166,6 +168,17 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("prefers-color-scheme: dark", self.css)
         self.assertIn("overflow-wrap: anywhere", self.css)
         self.assertRegex(self.css, r"body \{[^}]*overflow-x: hidden")
+
+    def test_user_documentation_covers_windows_and_fnos_deployment(self):
+        readme = README_PATH.read_text(encoding="utf-8")
+        for token in (
+            "Solis_Timelapse", "run.bat", "docker compose", "INPUT_PATH",
+            "APP_ROOT", "/media/input:ro", "PUID", "PGID",
+            "/vol1/1000/solis_timelapse", "9501", "不要直接暴露到公网",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, readme)
+        self.assertIn(".superpowers/", GITIGNORE_PATH.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

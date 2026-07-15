@@ -1,1 +1,1 @@
-"""Sony timelapse WebUI package."""
+"""Solis_Timelapse WebUI package."""
