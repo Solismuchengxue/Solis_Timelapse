@@ -1,0 +1,18 @@
+services:
+  solis_timelapse:
+    image: solis_timelapse
+    build: .
+    container_name: solis_timelapse
+    user: "${PUID}:${PGID}"
+    environment:
+      SOLIS_CONTAINER: "1"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "9501:9501"
+    volumes:
+      - "${INPUT_PATH}:/media/input:ro"
+      - "${APP_ROOT}/workspace:/media/workspace"
+      - "${APP_ROOT}/output:/media/output"
+      - "${APP_ROOT}/archive:/media/archive"
+      - "${APP_ROOT}/config:/data/config"
+    restart: unless-stopped

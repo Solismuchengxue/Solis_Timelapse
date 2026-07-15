@@ -1,4 +1,4 @@
-"""Local Flask server for the Sony timelapse WebUI."""
+"""Flask server for the Solis_Timelapse WebUI."""
 from __future__ import annotations
 
 import argparse
@@ -1009,7 +1009,7 @@ def create_app(overrides: dict | None = None) -> Flask:
 
 def _print_banner(host: str, port: int) -> None:
     print(
-        f"\nSony Timelapse WebUI is running\n"
+        f"\nSolis_Timelapse WebUI is running\n"
         f"Local URL: http://127.0.0.1:{port}/\n"
         f"Binding: {host}:{port}\n"
         "Close this window or press Ctrl+C to stop the server.\n",
@@ -1017,13 +1017,13 @@ def _print_banner(host: str, port: int) -> None:
     )
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     defaults = config_io.load_config()["server"]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=defaults["host"])
     parser.add_argument("--port", type=int, default=int(defaults["port"]))
     parser.add_argument("--no-browser", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     _print_banner(args.host, args.port)
     if defaults.get("open_browser", True) and not args.no_browser:
