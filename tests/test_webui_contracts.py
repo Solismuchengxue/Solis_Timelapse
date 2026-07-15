@@ -142,6 +142,11 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("grid-template-columns: minmax(270px, 330px)", self.css)
         self.assertIn("position: fixed", self.css)
         self.assertIn("@media (max-width: 767px)", self.css)
+
+    def test_desktop_task_actions_stay_on_one_line(self):
+        self.assertIn(".task-actions { flex-wrap: nowrap; }", self.css)
+        self.assertIn(".task-actions label { display: flex;", self.css)
+        self.assertIn(".task-actions select { width: 180px;", self.css)
         self.assertIn("prefers-color-scheme: dark", self.css)
         self.assertIn("overflow-wrap: anywhere", self.css)
         self.assertRegex(self.css, r"body \{[^}]*overflow-x: hidden")

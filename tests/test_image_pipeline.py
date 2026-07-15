@@ -249,6 +249,114 @@ class ImagePipelineTests(unittest.TestCase):
         self.assertEqual(len(output_names), 7)
         self.assertEqual(before, {path: _digest(path) for path in self.frames})
 
+    def test_duplicate_names_from_different_directories_render_once_in_stable_order(self):
+        first_dir = self.source / "first"
+        second_dir = self.source / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first = first_dir / "frame_000.jpg"
+        second = second_dir / "frame_000.jpg"
+        _write_frame(first, 25)
+        _write_frame(second, 200)
+        segment = {**self.segment, "frames": [str(first), str(second)]}
+        analysis = self._analysis_for([first, second])
+        before = {path: _digest(path) for path in (first, second)}
+
+        with (
+            mock.patch("src.image_pipeline.load_image", wraps=image_ops.load_image) as decode,
+            mock.patch("src.image_pipeline.save_jpeg", wraps=image_ops.save_jpeg) as save,
+        ):
+            image_pipeline.render_segment(
+                segment,
+                self.recipe,
+                analysis,
+                self.root / "duplicate-target",
+                lambda *a, **k: None,
+                lambda: False,
+            )
+
+        outputs = sorted((self.root / "duplicate-target" / "result").glob("*.jpg"))
+        self.assertEqual(len(outputs), 2)
+        self.assertNotEqual(outputs[0].name.casefold(), outputs[1].name.casefold())
+        self.assertEqual(decode.call_count, 2)
+        self.assertEqual(save.call_count, 2)
+        self.assertLess(np.asarray(Image.open(outputs[0])).mean(), np.asarray(Image.open(outputs[1])).mean())
+
+        image_pipeline.render_segment(
+            segment,
+            self.recipe,
+            analysis,
+            self.root / "duplicate-target-2",
+            lambda *a, **k: None,
+            lambda: False,
+        )
+        second_names = sorted(
+            path.name for path in (self.root / "duplicate-target-2" / "result").glob("*.jpg")
+        )
+        self.assertEqual([path.name for path in outputs], second_names)
+        self.assertEqual(before, {path: _digest(path) for path in (first, second)})
+
+    def test_duplicate_sequences_keep_source_timeline_when_outputs_are_sorted(self):
+        first_dir = self.source / "first"
+        second_dir = self.source / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        paths = [
+            first_dir / "frame_000.jpg",
+            first_dir / "frame_001.jpg",
+            second_dir / "frame_000.jpg",
+            second_dir / "frame_001.jpg",
+        ]
+        for path, value in zip(paths, (20, 70, 140, 220)):
+            _write_frame(path, value)
+        segment = {**self.segment, "frames": [str(path) for path in paths]}
+
+        image_pipeline.render_segment(
+            segment,
+            self.recipe,
+            self._analysis_for(paths),
+            self.root / "duplicate-sequence-target",
+            lambda *a, **k: None,
+            lambda: False,
+        )
+
+        outputs = sorted((self.root / "duplicate-sequence-target" / "result").glob("*.jpg"))
+        means = [float(np.asarray(Image.open(path)).mean()) for path in outputs]
+        self.assertEqual(len(outputs), 4)
+        self.assertEqual(means, sorted(means))
+
+    def test_rejecting_duplicate_by_source_path_keeps_other_original_name(self):
+        first_dir = self.source / "first"
+        second_dir = self.source / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first = first_dir / "frame_000.jpg"
+        second = second_dir / "frame_000.jpg"
+        _write_frame(first, 25)
+        _write_frame(second, 200)
+        segment = {**self.segment, "frames": [str(first), str(second)]}
+        analysis = self._analysis_for([first, second])
+        recipe = dict(self.recipe)
+        recipe["deglare"] = {"enable": True, "reject": [str(second.resolve())]}
+
+        with mock.patch("src.image_pipeline.load_image", wraps=image_ops.load_image) as decode:
+            result = image_pipeline.render_segment(
+                segment,
+                recipe,
+                analysis,
+                self.root / "reject-target",
+                lambda *a, **k: None,
+                lambda: False,
+            )
+
+        self.assertEqual(result.frame_count, 1)
+        self.assertEqual(result.rejected_count, 1)
+        self.assertEqual(decode.call_count, 1)
+        self.assertEqual(
+            [path.name for path in (self.root / "reject-target" / "result").glob("*.jpg")],
+            ["frame_000.jpg"],
+        )
+
     def test_render_applies_combined_gain_then_grade_then_golden(self):
         one_frame = {**self.segment, "frames": [str(self.frames[0])]}
         analysis = self._analysis_for([self.frames[0]], [1.1])

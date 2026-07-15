@@ -256,8 +256,9 @@ def analyze_segment(
     return analysis
 
 
-def _rejected_names(segment: dict, recipe: dict) -> set[str]:
-    rejected = set()
+def _rejection_rules(segment: dict, recipe: dict) -> tuple[set[str], set[str]]:
+    rejected_paths = set()
+    rejected_names = set()
     for value in (
         segment.get("rejected_frames", []),
         segment.get("bad_frames", []),
@@ -265,10 +266,41 @@ def _rejected_names(segment: dict, recipe: dict) -> set[str]:
         recipe.get("deglare", {}).get("reject", []),
     ):
         for item in value:
-            path = Path(str(item))
-            rejected.add(path.name.casefold())
-            rejected.add(path.stem.casefold())
-    return rejected
+            text = str(item)
+            path = Path(text)
+            if path.is_absolute() or "/" in text or "\\" in text:
+                rejected_paths.add(_path_key(path))
+            else:
+                rejected_names.add(path.name.casefold())
+                rejected_names.add(path.stem.casefold())
+    return rejected_paths, rejected_names
+
+
+def _is_rejected(path: Path, rules: tuple[set[str], set[str]]) -> bool:
+    rejected_paths, rejected_names = rules
+    return (
+        _path_key(path) in rejected_paths
+        or path.name.casefold() in rejected_names
+        or path.stem.casefold() in rejected_names
+    )
+
+
+def _render_output_names(
+    paths: list[Path], rules: tuple[set[str], set[str]]
+) -> dict[int, str]:
+    """Assign deterministic names while preserving non-conflicting frame stems."""
+    kept = [(index, path) for index, path in enumerate(paths) if not _is_rejected(path, rules)]
+    groups: dict[str, list[tuple[int, Path]]] = {}
+    for index, path in kept:
+        groups.setdefault(f"{path.stem}.jpg".casefold(), []).append((index, path))
+
+    if all(len(group) == 1 for group in groups.values()):
+        return {index: f"{path.stem}.jpg" for index, path in kept}
+
+    return {
+        index: f"{ordinal:06d}__{path.stem}.jpg"
+        for ordinal, (index, path) in enumerate(kept, start=1)
+    }
 
 
 def _analysis_gain_by_path(paths: list[Path], analysis: dict) -> list[float]:
@@ -344,7 +376,8 @@ def render_segment(
     """Render every kept frame from its source and publish the result directory."""
     paths = _frame_paths(segment)
     gains = _analysis_gain_by_path(paths, analysis)
-    rejected = _rejected_names(segment, recipe)
+    rejection_rules = _rejection_rules(segment, recipe)
+    output_names = _render_output_names(paths, rejection_rules)
     decode = recipe.get("decode", {})
     configured_grade = recipe.get("grade", {})
     if isinstance(configured_grade, str):
@@ -362,21 +395,16 @@ def render_segment(
     result_dir = target_dir / "result"
     saved = 0
     rejected_count = 0
-    output_names = set()
 
     try:
         for index, (path, gain) in enumerate(zip(paths, gains), start=1):
             _check_cancelled(cancelled)
-            if path.name.casefold() in rejected or path.stem.casefold() in rejected:
+            if _is_rejected(path, rejection_rules):
                 rejected_count += 1
                 progress(index, len(paths), frame=str(path), rejected=True)
                 continue
 
-            output_name = f"{path.stem}.jpg"
-            folded_name = output_name.casefold()
-            if folded_name in output_names:
-                raise ValueError(f"duplicate output frame name: {output_name}")
-            output_names.add(folded_name)
+            output_name = output_names[index - 1]
 
             rgb = load_image(path, decode, half=False)
             rgb = apply_gain(rgb, gain)
