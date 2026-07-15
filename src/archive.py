@@ -33,6 +33,36 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
+def _overlaps(left: Path, right: Path) -> bool:
+    return _is_within(left, right) or _is_within(right, left)
+
+
+def _validate_roots(
+    project: dict,
+    workspace: Path,
+    output_dir: Path,
+    archive_dir: Path,
+) -> None:
+    managed_roots = {
+        "workspace": workspace,
+        "output": output_dir,
+        "archive": archive_dir,
+    }
+    names = list(managed_roots)
+    for index, left_name in enumerate(names):
+        for right_name in names[index + 1 :]:
+            if _overlaps(managed_roots[left_name], managed_roots[right_name]):
+                raise ValueError(f"{left_name} and {right_name} directories must not overlap")
+
+    source_value = project.get("source_dir")
+    if not source_value:
+        raise ValueError("project source_dir is required")
+    source_dir = Path(source_value).resolve()
+    for name, managed_root in managed_roots.items():
+        if _overlaps(source_dir, managed_root):
+            raise ValueError(f"source and {name} directories must not overlap")
+
+
 def _digest(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as stream:
@@ -99,10 +129,9 @@ def archive_project(
     workspace = Path(workspace).resolve()
     output_dir = Path(output_dir).resolve()
     archive_dir = Path(archive_dir).resolve()
+    _validate_roots(project, workspace, output_dir, archive_dir)
     if not workspace.is_dir():
         raise FileNotFoundError(f"workspace does not exist: {workspace}")
-    if _is_within(output_dir, workspace) or _is_within(archive_dir, workspace):
-        raise ValueError("output and archive directories must be outside workspace")
 
     archive_name = timestamp or datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
     if Path(archive_name).name != archive_name or archive_name in {".", ".."}:

@@ -111,6 +111,60 @@ class ArchiveTests(unittest.TestCase):
                 timestamp="2026-07-15_120002",
             )
 
+    def test_workspace_output_archive_roots_must_be_pairwise_disjoint(self):
+        cases = [
+            ("same workspace output", "workspace", "workspace", "archive"),
+            ("output inside workspace", "workspace", "workspace/output", "archive"),
+            ("workspace inside output", "output/workspace", "output", "archive"),
+            ("archive inside workspace", "workspace", "output", "workspace/archive"),
+            ("workspace inside archive", "archive/workspace", "output", "archive"),
+            ("archive inside output", "workspace", "output", "output/archive"),
+            ("output inside archive", "workspace", "archive/output", "archive"),
+        ]
+        for index, (label, workspace, output, archive) in enumerate(cases):
+            with self.subTest(label=label):
+                case_root = self.root / f"roots-{index}"
+                paths = [case_root / workspace, case_root / output, case_root / archive]
+                for path in paths:
+                    path.mkdir(parents=True, exist_ok=True)
+                marker = paths[0] / "keep.txt"
+                marker.write_bytes(b"workspace")
+                project = {"source_dir": str(case_root / "source"), "segments": []}
+
+                with self.assertRaises(ValueError):
+                    archive_project(project, *paths, timestamp="2026-07-15_130000")
+
+                self.assertEqual(marker.read_bytes(), b"workspace")
+                self.assertEqual(list(case_root.rglob(".archiving-*")), [])
+
+    def test_source_must_not_overlap_any_managed_root_in_either_direction(self):
+        cases = [
+            ("source equals workspace", "workspace", "workspace", "output", "archive"),
+            ("source in workspace", "workspace/source", "workspace", "output", "archive"),
+            ("workspace in source", "source", "source/workspace", "output", "archive"),
+            ("source in output", "output/source", "workspace", "output", "archive"),
+            ("output in source", "source", "workspace", "source/output", "archive"),
+            ("source in archive", "archive/source", "workspace", "output", "archive"),
+            ("archive in source", "source", "workspace", "output", "source/archive"),
+        ]
+        for index, (label, source, workspace, output, archive) in enumerate(cases):
+            with self.subTest(label=label):
+                case_root = self.root / f"source-roots-{index}"
+                source_path = case_root / source
+                paths = [case_root / workspace, case_root / output, case_root / archive]
+                source_path.mkdir(parents=True, exist_ok=True)
+                for path in paths:
+                    path.mkdir(parents=True, exist_ok=True)
+                marker = paths[0] / "keep.txt"
+                marker.write_bytes(b"workspace")
+                project = {"source_dir": str(source_path), "segments": []}
+
+                with self.assertRaises(ValueError):
+                    archive_project(project, *paths, timestamp="2026-07-15_140000")
+
+                self.assertEqual(marker.read_bytes(), b"workspace")
+                self.assertEqual(list(case_root.rglob(".archiving-*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

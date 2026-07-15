@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
+from .task_manager import TaskCancelled
+
 
 VALID_FPS = {24, 25, 30, 50, 60}
 FRAME_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -62,6 +64,7 @@ def export_video(
     output: Path,
     options: dict,
     progress: Callable | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Path:
     frame_dir = Path(frame_dir)
     if not frame_dir.is_dir():
@@ -135,6 +138,8 @@ def export_video(
         subprocess.run(command, check=True, capture_output=True, text=True)
         if not temporary_output.is_file():
             raise RuntimeError("FFmpeg completed without creating an output file")
+        if cancelled is not None and cancelled():
+            raise TaskCancelled("task cancelled")
         os.replace(temporary_output, final_output)
         if progress is not None:
             progress(len(frames), len(frames), file=final_output.name)

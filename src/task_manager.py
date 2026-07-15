@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-ACTIVE_STATES = {"queued", "running", "cancelling"}
+ACTIVE_STATES = {"pending", "queued", "running", "cancelling"}
 
 
 class TaskBusy(RuntimeError):
@@ -22,6 +22,10 @@ class TaskBusy(RuntimeError):
 
 class TaskCancelled(RuntimeError):
     """Raised at a cooperative cancellation boundary."""
+
+
+class TaskNotCancellable(RuntimeError):
+    """Raised when cancellation is forbidden after a task starts running."""
 
 
 def _now() -> str:
@@ -67,6 +71,7 @@ class TaskManager:
         self._state = self._load_state()
         if self._state["status"] in ACTIVE_STATES:
             self._state["status"] = "interrupted"
+            self._state["cancellable"] = False
             self._state["finished_at"] = _now()
             self._state["error"] = "任务因服务重启而中断"
             self._persist_locked()
@@ -77,6 +82,8 @@ class TaskManager:
             "job_id": None,
             "kind": None,
             "status": "idle",
+            "cancellable": False,
+            "cancellable_while_running": True,
             "completed": 0,
             "total": 0,
             "detail": {},
@@ -98,6 +105,8 @@ class TaskManager:
             return state
         if isinstance(loaded, dict):
             state.update(loaded)
+            if "cancellable_while_running" not in loaded:
+                state["cancellable_while_running"] = bool(loaded.get("cancellable", True))
         state["logs"] = list(state.get("logs") or [])[-self._max_logs :]
         state["detail"] = dict(state.get("detail") or {})
         return state
@@ -113,7 +122,13 @@ class TaskManager:
         )
         os.replace(temporary, self._state_path)
 
-    def submit(self, kind: str, fn: Callable[[TaskContext], Any]) -> dict:
+    def submit(
+        self,
+        kind: str,
+        fn: Callable[[TaskContext], Any],
+        *,
+        cancellable_while_running: bool = True,
+    ) -> dict:
         if not kind or not callable(fn):
             raise ValueError("kind and callable fn are required")
         with self._lock:
@@ -126,6 +141,8 @@ class TaskManager:
                 "job_id": job_id,
                 "kind": kind,
                 "status": "queued",
+                "cancellable": True,
+                "cancellable_while_running": bool(cancellable_while_running),
                 "created_at": _now(),
             }
             self._persist_locked()
@@ -141,7 +158,16 @@ class TaskManager:
         with self._lock:
             if self._state.get("job_id") != job_id:
                 return
+            if cancel_event.is_set():
+                self._state["status"] = "cancelled"
+                self._state["cancellable"] = False
+                self._state["finished_at"] = _now()
+                self._persist_locked()
+                return
             self._state["status"] = "running"
+            self._state["cancellable"] = bool(
+                self._state.get("cancellable_while_running", True)
+            )
             self._state["started_at"] = _now()
             self._persist_locked()
 
@@ -193,6 +219,7 @@ class TaskManager:
             if self._state.get("job_id") != job_id:
                 return
             self._state["status"] = status
+            self._state["cancellable"] = False
             self._state["result"] = deepcopy(result)
             self._state["error"] = error
             self._state["finished_at"] = _now()
@@ -200,9 +227,18 @@ class TaskManager:
 
     def cancel(self) -> dict:
         with self._lock:
-            if self._state["status"] in {"queued", "running"}:
+            status = self._state["status"]
+            if status in {"pending", "queued"}:
                 self._cancel_event.set()
                 self._state["status"] = "cancelling"
+                self._state["cancellable"] = False
+                self._persist_locked()
+            elif status == "running":
+                if not self._state.get("cancellable_while_running", True):
+                    raise TaskNotCancellable("running task cannot be cancelled")
+                self._cancel_event.set()
+                self._state["status"] = "cancelling"
+                self._state["cancellable"] = False
                 self._persist_locked()
             return deepcopy(self._state)
 

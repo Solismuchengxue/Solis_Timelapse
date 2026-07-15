@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from src.task_manager import TaskCancelled
 from src.video_export import export_video, sanitize_windows_filename
 
 
@@ -78,6 +79,47 @@ class VideoExportTests(unittest.TestCase):
         self.assertEqual(sanitize_windows_filename("A:B.mp4"), "A_B.mp4")
         self.assertEqual(sanitize_windows_filename("CON.mp4"), "_CON.mp4")
         self.assertEqual(sanitize_windows_filename("clip. .mp4"), "clip.mp4")
+
+    def test_cancel_after_ffmpeg_keeps_existing_published_video(self):
+        output = self.root / "movie.mp4"
+        output.write_bytes(b"previous-video")
+
+        def fake_run(command, **kwargs):
+            Path(command[-1]).write_bytes(b"new-video")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("src.video_export.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(TaskCancelled):
+                export_video(
+                    self.frames,
+                    output,
+                    {"ffmpeg_exe": "ffmpeg-test", "fps": 30},
+                    cancelled=lambda: True,
+                )
+
+        self.assertEqual(output.read_bytes(), b"previous-video")
+        self.assertEqual(list(self.root.glob(".frames-*.ffconcat")), [])
+        self.assertEqual(list(self.root.glob(".*-rendering-*.mp4")), [])
+
+    def test_cancel_after_ffmpeg_does_not_publish_new_video(self):
+        output = self.root / "cancelled.mp4"
+
+        def fake_run(command, **kwargs):
+            Path(command[-1]).write_bytes(b"encoded-video")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("src.video_export.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(TaskCancelled):
+                export_video(
+                    self.frames,
+                    output,
+                    {"ffmpeg_exe": "ffmpeg-test", "fps": 30},
+                    cancelled=lambda: True,
+                )
+
+        self.assertFalse(output.exists())
+        self.assertEqual(list(self.root.glob(".frames-*.ffconcat")), [])
+        self.assertEqual(list(self.root.glob(".*-rendering-*.mp4")), [])
 
 
 if __name__ == "__main__":
