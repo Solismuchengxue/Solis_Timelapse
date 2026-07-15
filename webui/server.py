@@ -443,7 +443,7 @@ def create_app(overrides: dict | None = None) -> Flask:
 
     @app.get("/<path:filename>")
     def static_asset(filename):
-        if filename not in {"styles.css", "app.js"}:
+        if filename not in {"styles.css", "app.js", "ui_prefs.js"}:
             return _error("资源不存在", "not_found", 404)
         return send_from_directory(WEBUI_DIR, filename)
 

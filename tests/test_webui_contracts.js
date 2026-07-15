@@ -2,10 +2,12 @@
 
 const fs = require("fs");
 const path = require("path");
+const nodeAssert = require("assert/strict");
 
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "webui", "index.html"), "utf8");
 const js = fs.readFileSync(path.join(root, "webui", "app.js"), "utf8");
+const prefs = require(path.join(root, "webui", "ui_prefs.js"));
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -14,6 +16,24 @@ function assert(condition, message) {
 const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
 assert(ids.length === new Set(ids).size, "HTML contains duplicate IDs");
 assert(!/\son[a-z]+\s*=/i.test(html), "Inline event handlers are not allowed");
+
+nodeAssert.deepStrictEqual(prefs.SUPPORTED_THEMES, ["light", "dark", "system"]);
+nodeAssert.deepStrictEqual(prefs.SUPPORTED_LANGUAGES, ["zh-CN", "en"]);
+nodeAssert.strictEqual(prefs.normalizeTheme("broken"), "system");
+nodeAssert.strictEqual(prefs.normalizeLanguage("broken", "zh-Hans-CN"), "zh-CN");
+nodeAssert.strictEqual(prefs.normalizeLanguage(null, "en-US"), "en");
+nodeAssert.strictEqual(prefs.t("en", "nav.workbench"), "Workbench");
+let missingWarning = "";
+const originalWarn = console.warn;
+console.warn = (message) => { missingWarning = message; };
+nodeAssert.strictEqual(prefs.t("en", "missing.key"), "missing.key");
+console.warn = originalWarn;
+nodeAssert.strictEqual(missingWarning, "Missing translation: missing.key");
+nodeAssert.deepStrictEqual(
+  Object.keys(prefs.TRANSLATIONS["zh-CN"]).sort(),
+  Object.keys(prefs.TRANSLATIONS.en).sort(),
+  "Chinese and English translation keys must match",
+);
 
 for (const id of [
   "pick-source-btn", "scan-btn", "segment-list", "segment-preview",
@@ -65,6 +85,10 @@ assert(js.includes("segmentCounts.reduce((total, count) => total + count, 0)"), 
 assert(js.includes("entry.jpeg_count ?? entry.frame_count ?? 0"), "JPEG count needs legacy top-level fallback");
 assert(html.includes('id="settings-save-status"'), "Settings need a live save status");
 assert(js.includes("payload.restart_required"), "Settings must inspect restart_required");
-assert(js.includes('"已保存，重启程序后生效"'), "Restart-required save notice must be explicit");
+assert(js.includes('t("settings.saved_restart")'), "Restart-required save notice must be translated");
 assert(html.includes('id="settings-workspace-dir" name="workspace_dir" type="text" readonly'), "Workspace setting must be picker-only");
+for (const token of ["theme-select", "language-select", "solis:themechange", "solis:languagechange"]) {
+  assert(html.includes(token) || js.includes(token), `Missing UI preference wiring: ${token}`);
+}
+assert(!js.includes("正在读取历史..."), "Dynamic copy must come from i18n");
 console.log("WebUI static contracts passed");

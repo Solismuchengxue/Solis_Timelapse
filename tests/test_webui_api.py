@@ -88,6 +88,13 @@ class WebUiApiTests(unittest.TestCase):
             self.root / "workspace" / "task.json",
         )
 
+    def test_local_ui_preference_module_is_served(self):
+        response = self.client.get("/ui_prefs.js")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"SolisUI", response.data)
+        response.close()
+
     def test_configured_runtime_roots_must_not_overlap(self):
         with self.assertRaisesRegex(ValueError, "overlap"):
             create_app({

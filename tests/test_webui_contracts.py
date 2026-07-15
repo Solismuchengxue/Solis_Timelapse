@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HTML_PATH = ROOT / "webui" / "index.html"
 JS_PATH = ROOT / "webui" / "app.js"
 CSS_PATH = ROOT / "webui" / "styles.css"
+PREFS_PATH = ROOT / "webui" / "ui_prefs.js"
 
 
 class WebUiStaticContractTests(unittest.TestCase):
@@ -15,6 +16,17 @@ class WebUiStaticContractTests(unittest.TestCase):
         cls.html = HTML_PATH.read_text(encoding="utf-8")
         cls.js = JS_PATH.read_text(encoding="utf-8")
         cls.css = CSS_PATH.read_text(encoding="utf-8")
+
+    def test_theme_i18n_assets_and_studio_regions_exist(self):
+        self.assertTrue(PREFS_PATH.is_file())
+        for required_id in (
+            "theme-select", "language-select", "sidebar-nav",
+            "studio-main", "task-bar",
+        ):
+            self.assertIn(f'id="{required_id}"', self.html)
+        self.assertIn('data-theme="system"', self.html)
+        self.assertIn('src="/ui_prefs.js"', self.html)
+        self.assertLess(self.html.index('/ui_prefs.js'), self.html.index('/app.js'))
 
     def test_required_workbench_controls_have_stable_ids(self):
         required_ids = {
@@ -100,7 +112,7 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("historySortValue(right) - historySortValue(left)", self.js)
         self.assertIn("entry.timestamp || entry.created_at || entry.archived_at", self.js)
         self.assertIn("function recipeSummary(entry)", self.js)
-        self.assertIn('recipes.textContent = `配方：${recipeSummary(entry)}`', self.js)
+        self.assertIn('recipes.textContent = t("history.recipe"', self.js)
 
     def test_history_detail_preserves_summary_media_urls(self):
         self.assertIn("async function loadHistoryDetail(summary)", self.js)
@@ -136,12 +148,14 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn('id="settings-save-status"', self.html)
         self.assertIn('role="status"', self.html)
         self.assertIn("payload.restart_required", self.js)
-        self.assertIn('"已保存，重启程序后生效"', self.js)
+        self.assertIn('t("settings.saved_restart")', self.js)
 
     def test_layout_contract_is_desktop_first_and_responsive(self):
-        self.assertIn("grid-template-columns: minmax(270px, 330px)", self.css)
+        self.assertIn("grid-template-columns: 220px minmax(0, 1fr)", self.css)
         self.assertIn("position: fixed", self.css)
-        self.assertIn("@media (max-width: 767px)", self.css)
+        self.assertIn("@media (max-width: 720px)", self.css)
+        self.assertNotIn("linear-gradient(", self.css)
+        self.assertNotIn("radial-gradient(", self.css)
 
     def test_desktop_task_actions_stay_on_one_line(self):
         self.assertIn(".task-actions { flex-wrap: nowrap; }", self.css)

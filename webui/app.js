@@ -24,6 +24,8 @@ const API = Object.freeze({
 
 const ACTIVE_TASK_STATES = new Set(["queued", "running", "cancelling"]);
 const PAGE_SIZE = 24;
+const ui = window.SolisUI;
+let preferences = ui.loadPreferences(window.localStorage, window.navigator.language);
 
 const state = {
   project: null,
@@ -45,6 +47,45 @@ const state = {
 
 const byId = (id) => document.getElementById(id);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const t = (key, params = {}) => ui.t(preferences.language, key, params);
+
+function translateDocument() {
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
+    node.textContent = t(node.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((node) => {
+    node.title = t(node.dataset.i18nTitle);
+  });
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((node) => {
+    node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel));
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
+    node.placeholder = t(node.dataset.i18nPlaceholder);
+  });
+  document.title = t("app.title");
+}
+
+function applyTheme(theme) {
+  preferences.theme = ui.normalizeTheme(theme);
+  localStorage.setItem("solis.theme", preferences.theme);
+  ui.applyPreferences(document, preferences);
+  byId("theme-select").value = preferences.theme;
+  drawChart();
+  window.dispatchEvent(new CustomEvent("solis:themechange", { detail: { value: preferences.theme } }));
+}
+
+function applyLanguage(language) {
+  preferences.language = ui.normalizeLanguage(language, navigator.language);
+  localStorage.setItem("solis.language", preferences.language);
+  ui.applyPreferences(document, preferences);
+  byId("language-select").value = preferences.language;
+  translateDocument();
+  renderAll();
+  renderFrameStrip();
+  renderHistory();
+  drawChart();
+  window.dispatchEvent(new CustomEvent("solis:languagechange", { detail: { value: preferences.language } }));
+}
 
 async function api(path, options = {}) {
   const request = { ...options, headers: { Accept: "application/json", ...(options.headers || {}) } };
@@ -56,8 +97,11 @@ async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : null;
   if (!response.ok) {
-    const error = new Error(payload?.error || `请求失败（HTTP ${response.status}）`);
-    error.code = payload?.code || "request_failed";
+    const code = payload?.code || "request_failed";
+    const translated = ui.TRANSLATIONS[preferences.language]?.[`error.${code}`]
+      || ui.TRANSLATIONS["zh-CN"]?.[`error.${code}`];
+    const error = new Error(translated || payload?.error || `${t("error.unknown")} (HTTP ${response.status})`);
+    error.code = code;
     error.status = response.status;
     throw error;
   }
@@ -65,7 +109,8 @@ async function api(path, options = {}) {
 }
 
 function showError(error) {
-  byId("error-message").textContent = error?.message || String(error);
+  const translated = error?.code ? ui.TRANSLATIONS[preferences.language]?.[`error.${error.code}`] : null;
+  byId("error-message").textContent = translated || error?.message || String(error) || t("error.unknown");
   byId("error-banner").hidden = false;
 }
 
@@ -132,28 +177,30 @@ function renderAll() {
 function renderSource() {
   const source = state.project?.source_dir || state.pendingSourcePath || "";
   const pathLabel = byId("source-path");
-  pathLabel.textContent = source || "尚未选择素材目录";
-  pathLabel.title = source || "尚未选择素材目录";
+  pathLabel.textContent = source || t("source.none");
+  pathLabel.title = source || t("source.none");
   const total = segments().reduce((sum, segment) => sum + frameCount(segment), 0);
   const duration = state.project?.duration_seconds;
-  const durationText = Number.isFinite(duration) ? `，拍摄时长 ${formatDuration(duration)}` : "";
-  byId("source-summary").textContent = total ? `${total} 帧，${segments().length} 个分段${durationText}` : "选择包含 ARW、JPG 或 JPEG 的目录。";
+  const durationText = Number.isFinite(duration) ? formatDuration(duration) : "";
+  byId("source-summary").textContent = total
+    ? t("source.summary", { frames: total, segments: segments().length, duration: durationText })
+    : t("source.help");
 }
 
 function formatDuration(seconds) {
   const minutes = Math.floor(seconds / 60);
   const remaining = Math.round(seconds % 60);
-  return `${minutes} 分 ${remaining} 秒`;
+  return t("source.duration", { minutes, seconds: remaining });
 }
 
 function renderSegments() {
   const list = byId("segment-list");
   list.replaceChildren();
-  byId("segment-count").textContent = `${segments().length} 段`;
+  byId("segment-count").textContent = t("segment.count", { count: segments().length });
   if (!segments().length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "扫描后在此审核分段";
+    empty.textContent = t("segment.empty");
     list.append(empty);
     return;
   }
@@ -169,12 +216,12 @@ function renderSegments() {
     button.setAttribute("aria-selected", String(isSelected));
 
     const name = document.createElement("strong");
-    name.textContent = segment.name || "未命名分段";
+    name.textContent = segment.name || t("segment.unnamed");
     const meta = document.createElement("span");
     meta.className = "segment-item-meta";
-    const focal = segment.focal_length ? `${segment.focal_length}mm` : "焦距未知";
-    const timeRange = segment.time_range || segment.captured_range || "时间未知";
-    meta.textContent = `${frameCount(segment)} 帧 · ${focal} · ${timeRange}`;
+    const focal = segment.focal_length ? `${segment.focal_length}mm` : t("segment.focal_unknown");
+    const timeRange = segment.time_range || segment.captured_range || t("segment.time_unknown");
+    meta.textContent = t("segment.meta", { count: frameCount(segment), focal, time: timeRange });
     const status = document.createElement("span");
     status.className = "segment-item-meta";
     status.textContent = statusLabel(segment.status || segment.render_status || "pending");
@@ -184,7 +231,8 @@ function renderSegments() {
 }
 
 function statusLabel(value) {
-  return ({ idle: "空闲", pending: "待处理", analyzed: "已分析", rendered: "已渲染", completed: "已完成", running: "处理中", queued: "等待中", cancelling: "正在取消", cancelled: "已取消", failed: "失败", interrupted: "已中断" })[value] || value || "未知";
+  const key = `status.${value || "unknown"}`;
+  return ui.TRANSLATIONS[preferences.language]?.[key] || ui.TRANSLATIONS["zh-CN"]?.[key] || value || t("status.unknown");
 }
 
 function recipeOf(segment) {
@@ -201,7 +249,7 @@ function renderSegmentDetail() {
   const segmentStatus = byId("segment-status");
   const value = segment?.status || segment?.render_status || "idle";
   segmentStatus.dataset.status = value;
-  segmentStatus.textContent = segment ? statusLabel(value) : "未选择";
+  segmentStatus.textContent = segment ? statusLabel(value) : t("segment.none");
 
   const recipeName = recipe.name || recipe.mode || "natural";
   byId("recipe-select").value = recipeName;
@@ -222,14 +270,14 @@ function renderSegmentDetail() {
   if (representative) {
     const image = document.createElement("img");
     image.src = representative;
-    image.alt = `${segment.name || "当前分段"}代表帧`;
+    image.alt = t("preview.alt", { name: segment.name || t("segment.current") });
     surface.append(image);
-    byId("preview-caption").textContent = segment?.representative_name || segment?.name || "当前代表帧";
+    byId("preview-caption").textContent = segment?.representative_name || segment?.name || t("preview.representative");
   } else {
     const placeholder = document.createElement("span");
-    placeholder.textContent = segment ? "正在等待缩略图" : "暂无预览";
+    placeholder.textContent = segment ? t("preview.waiting") : t("preview.none");
     surface.append(placeholder);
-    byId("preview-caption").textContent = segment ? `${frameCount(segment)} 帧` : "选择分段后查看代表帧";
+    byId("preview-caption").textContent = segment ? t("segment.frames_only", { count: frameCount(segment) }) : t("preview.select");
   }
 }
 
@@ -267,7 +315,7 @@ function renderFrameStrip() {
   if (!pageFrames.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = selectedSegment() ? "该分段暂无缩略图" : "选择分段后检查帧";
+    empty.textContent = selectedSegment() ? t("frames.empty") : t("frames.select_segment");
     strip.append(empty);
   }
 
@@ -291,22 +339,24 @@ function renderFrameStrip() {
     strip.append(button);
   });
 
-  byId("frame-page-label").textContent = totalPages ? `${state.thumbnailPage + 1} / ${totalPages}` : "0 / 0";
+  byId("frame-page-label").textContent = t("frames.page", { current: totalPages ? state.thumbnailPage + 1 : 0, total: totalPages });
   byId("frame-page-prev").disabled = state.thumbnailPage <= 0;
   byId("frame-page-next").disabled = state.thumbnailPage >= totalPages - 1;
   const selected = [...state.selectedFrames].sort((a, b) => a - b);
-  byId("frame-selection-summary").textContent = selected.length ? `已选 ${selected.length} 帧：${selected[0] + 1}–${selected.at(-1) + 1}` : "未选择帧";
+  byId("frame-selection-summary").textContent = selected.length
+    ? t("frames.selected_range", { count: selected.length, start: selected[0] + 1, end: selected.at(-1) + 1 })
+    : t("frames.none_selected");
   byId("split-frame").value = selected.length === 1 ? selected[0] : byId("split-frame").value;
   renderActionAvailability();
 }
 
 function frameTooltip(frame, index) {
-  const parts = [frame.name || `第 ${index + 1} 帧`];
+  const parts = [frame.name || t("frames.index", { index: index + 1 })];
   if (frame.captured_at) parts.push(frame.captured_at);
-  if (frame.shutter) parts.push(`快门 ${frame.shutter}`);
+  if (frame.shutter) parts.push(t("frames.shutter", { value: frame.shutter }));
   if (frame.aperture) parts.push(`f/${frame.aperture}`);
   if (frame.iso) parts.push(`ISO ${frame.iso}`);
-  if (frame.luminance != null) parts.push(`亮度 ${Number(frame.luminance).toFixed(3)}`);
+  if (frame.luminance != null) parts.push(t("frames.luminance", { value: Number(frame.luminance).toFixed(3) }));
   return parts.join(" · ");
 }
 
@@ -341,13 +391,13 @@ function drawChart() {
 
   const chart = state.chart || {};
   const series = [
-    { values: chart.luminance || chart.measured_luminance || [], color: "#8d9892" },
-    { values: chart.target_luminance || chart.target || [], color: "#137d6b" },
-    { values: chart.gain || chart.gains || [], color: "#d18412" }
+    { values: chart.luminance || chart.measured_luminance || [], color: getComputedStyle(document.documentElement).getPropertyValue("--muted") },
+    { values: chart.target_luminance || chart.target || [], color: getComputedStyle(document.documentElement).getPropertyValue("--accent") },
+    { values: chart.gain || chart.gains || [], color: getComputedStyle(document.documentElement).getPropertyValue("--warning") }
   ].filter((item) => item.values.length);
   if (!series.length) {
     context.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
-    context.fillText("分析后显示曲线", 44, cssHeight / 2);
+    context.fillText(t("chart.empty"), 44, cssHeight / 2);
     return;
   }
   const all = series.flatMap((item) => item.values.map(Number).filter(Number.isFinite));
@@ -378,13 +428,13 @@ function renderTask() {
   byId("task-status").textContent = statusText;
   byId("header-task-status").textContent = statusText;
   byId("header-task-status").dataset.status = status;
-  byId("task-current").textContent = task.current_file || task.current_segment || task.detail?.current_file || task.message || "等待任务";
+  byId("task-current").textContent = task.current_file || task.current_segment || task.detail?.current_file || task.message || t("task.waiting");
   byId("task-percent").textContent = `${percent}%`;
   byId("task-progress").value = percent;
   byId("task-progress").textContent = `${percent}%`;
   byId("task-progress").setAttribute("aria-valuenow", String(percent));
   const logs = task.logs || task.log || [];
-  byId("task-log").textContent = Array.isArray(logs) && logs.length ? logs.map((line) => typeof line === "string" ? line : line.message).join("\n") : "暂无日志";
+  byId("task-log").textContent = Array.isArray(logs) && logs.length ? logs.map((line) => typeof line === "string" ? line : line.message).join("\n") : t("task.no_logs");
 }
 
 function renderActionAvailability() {
@@ -698,7 +748,10 @@ async function clearProject() {
 
 async function loadHistory() {
   const list = byId("history-list");
-  list.innerHTML = '<div class="empty-state">正在读取历史...</div>';
+  const loading = document.createElement("div");
+  loading.className = "empty-state";
+  loading.textContent = t("history.loading");
+  list.replaceChildren(loading);
   try {
     const payload = await api(API.history);
     const summaries = payload.history || payload.archives || payload.items || [];
@@ -749,7 +802,7 @@ function renderHistory() {
   if (!state.history.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "暂无归档";
+    empty.textContent = t("history.empty");
     list.append(empty);
     return;
   }
@@ -758,23 +811,23 @@ function renderHistory() {
     article.className = "history-entry";
     const identity = document.createElement("div");
     const title = document.createElement("h2");
-    title.textContent = entry.timestamp || entry.created_at || entry.archived_at || "旧版归档";
+    title.textContent = entry.timestamp || entry.created_at || entry.archived_at || t("history.legacy");
     const source = document.createElement("span");
     source.className = "muted";
-    source.textContent = entry.source_dir || "源目录记录不可用";
+    source.textContent = entry.source_dir || t("history.source_unavailable");
     source.title = source.textContent;
     identity.append(title, source);
     const summary = document.createElement("div");
     const counts = document.createElement("div");
-    counts.textContent = `${entry.segment_count ?? entry.segments?.length ?? 0} 段 · ${historyJpegCount(entry)} 张 JPEG`;
+    counts.textContent = t("history.counts", { segments: entry.segment_count ?? entry.segments?.length ?? 0, jpegs: historyJpegCount(entry) });
     const recipes = document.createElement("div");
     recipes.className = "recipe-summary";
-    recipes.textContent = `配方：${recipeSummary(entry)}`;
+    recipes.textContent = t("history.recipe", { value: recipeSummary(entry) });
     summary.append(counts, recipes);
     const media = document.createElement("div");
     media.className = "media-links";
-    appendMediaLinks(media, "预览", entry.previews || entry.preview_videos || []);
-    appendMediaLinks(media, "最终成片", entry.outputs || entry.final_videos || []);
+    appendMediaLinks(media, t("history.preview"), entry.previews || entry.preview_videos || []);
+    appendMediaLinks(media, t("history.output"), entry.outputs || entry.final_videos || []);
     article.append(identity, summary, media);
     list.append(article);
   });
@@ -802,10 +855,10 @@ function recipeSummary(entry) {
   (entry.segments || []).forEach((segment) => values.push(segment.recipe));
   const labels = values.filter(Boolean).map((recipe) => {
     if (typeof recipe === "string") return recipe;
-    const name = recipe.name || recipe.mode || recipe.preset || "自定义";
+    const name = recipe.name || recipe.mode || recipe.preset || t("recipe.custom");
     return recipe.strength == null ? name : `${name} ${recipe.strength}%`;
   });
-  return [...new Set(labels)].join("、") || "记录不可用";
+  return [...new Set(labels)].join(preferences.language === "zh-CN" ? "、" : ", ") || t("history.record_unavailable");
 }
 
 function appendMediaLinks(container, label, items) {
@@ -813,7 +866,7 @@ function appendMediaLinks(container, label, items) {
   if (!values.length) {
     const missing = document.createElement("span");
     missing.className = "muted";
-    missing.textContent = `${label}：无`;
+    missing.textContent = t("history.missing", { label });
     container.append(missing);
     return;
   }
@@ -865,8 +918,8 @@ async function saveSettings(event) {
     state.settings = payload.settings || payload.config || values;
     setSettingsForm(state.settings);
     byId("settings-save-status").textContent = payload.restart_required
-      ? "已保存，重启程序后生效"
-      : "已保存";
+      ? t("settings.saved_restart")
+      : t("settings.saved");
   } catch (error) { showError(error); }
 }
 
@@ -917,10 +970,18 @@ function bindEvents() {
   byId("refresh-history-btn").addEventListener("click", loadHistory);
   byId("settings-form").addEventListener("submit", saveSettings);
   document.querySelectorAll("[data-settings-directory]").forEach((button) => button.addEventListener("click", () => pickSettingsDirectory(button.dataset.settingsDirectory)));
+  byId("theme-select").addEventListener("change", (event) => applyTheme(event.target.value));
+  byId("language-select").addEventListener("change", (event) => applyLanguage(event.target.value));
   window.addEventListener("resize", drawChart);
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (preferences.theme === "system") drawChart();
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  byId("theme-select").value = preferences.theme;
+  byId("language-select").value = preferences.language;
+  translateDocument();
   bindEvents();
   renderFrameStrip();
   drawChart();

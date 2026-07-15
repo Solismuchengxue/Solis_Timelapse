@@ -1,296 +1,202 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="system">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>延时摄影工作台</title>
+  <title>Solis_Timelapse 延时摄影工作台</title>
+  <script src="/ui_prefs.js"></script>
   <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
-  <div id="app" class="app-shell">
-    <header class="app-header">
+  <div id="app" class="studio-shell">
+    <header class="studio-header">
       <div class="brand-block">
-        <strong>延时摄影工作台</strong>
-        <span id="source-path" class="path-label" title="尚未选择素材目录">尚未选择素材目录</span>
+        <strong data-i18n="app.name">Solis_Timelapse</strong>
+        <span id="source-path" class="path-label" title="尚未选择素材目录" data-i18n="source.none" data-i18n-title="source.none">尚未选择素材目录</span>
       </div>
-      <div class="header-status">
-        <span id="header-task-status" class="status-pill" data-status="idle">空闲</span>
-        <button id="open-settings-btn" class="icon-button" type="button" title="打开设置" aria-label="打开设置">&#9881;</button>
+      <div class="header-tools">
+        <span id="header-task-status" class="status-pill" data-status="idle" data-i18n="status.idle">空闲</span>
+        <label class="compact-select" for="theme-select"><span data-i18n="theme.label">主题</span>
+          <select id="theme-select">
+            <option value="system" data-i18n="theme.system">跟随系统</option>
+            <option value="light" data-i18n="theme.light">白天</option>
+            <option value="dark" data-i18n="theme.dark">夜间</option>
+          </select>
+        </label>
+        <label class="compact-select" for="language-select"><span data-i18n="language.label">语言</span>
+          <select id="language-select">
+            <option value="zh-CN" data-i18n="language.zh-CN">中文</option>
+            <option value="en" data-i18n="language.en">English</option>
+          </select>
+        </label>
+        <button id="open-settings-btn" class="icon-button" type="button" title="打开设置" aria-label="打开设置" data-i18n-title="nav.settings" data-i18n-aria-label="nav.settings">&#9881;</button>
       </div>
     </header>
 
-    <nav class="tab-bar" role="tablist" aria-label="主导航">
-      <button id="tab-workbench" class="tab-button is-active" type="button" role="tab" tabindex="0" data-view="workbench" aria-controls="view-workbench" aria-selected="true">工作台</button>
-      <button id="tab-history" class="tab-button" type="button" role="tab" tabindex="-1" data-view="history" aria-controls="view-history" aria-selected="false">历史</button>
-      <button id="tab-settings" class="tab-button" type="button" role="tab" tabindex="-1" data-view="settings" aria-controls="view-settings" aria-selected="false">设置</button>
-    </nav>
+    <aside id="sidebar-nav" class="studio-sidebar">
+      <nav class="tab-bar" role="tablist" aria-label="主导航" data-i18n-aria-label="nav.primary">
+        <button id="tab-workbench" class="tab-button is-active" type="button" role="tab" tabindex="0" data-view="workbench" aria-controls="view-workbench" aria-selected="true" data-i18n="nav.workbench">工作台</button>
+        <button id="tab-history" class="tab-button" type="button" role="tab" tabindex="-1" data-view="history" aria-controls="view-history" aria-selected="false" data-i18n="nav.history">历史</button>
+        <button id="tab-settings" class="tab-button" type="button" role="tab" tabindex="-1" data-view="settings" aria-controls="view-settings" aria-selected="false" data-i18n="nav.settings">设置</button>
+      </nav>
 
-    <div id="error-banner" class="error-banner" role="alert" hidden>
-      <span id="error-message"></span>
-      <button id="dismiss-error-btn" class="icon-button" type="button" aria-label="关闭错误提示" title="关闭">&#10005;</button>
-    </div>
+      <section class="segments-pane">
+        <div class="pane-heading">
+          <div><h2 data-i18n="segment.title">分段</h2><span id="segment-count" class="muted">0 段</span></div>
+          <div class="icon-cluster" aria-label="调整分段顺序" data-i18n-aria-label="segment.reorder">
+            <button id="move-up-btn" class="icon-button" type="button" title="上移分段" aria-label="上移分段" data-i18n-title="segment.move_up" data-i18n-aria-label="segment.move_up">&#8593;</button>
+            <button id="move-down-btn" class="icon-button" type="button" title="下移分段" aria-label="下移分段" data-i18n-title="segment.move_down" data-i18n-aria-label="segment.move_down">&#8595;</button>
+          </div>
+        </div>
+        <div id="segment-list" class="segment-list" role="listbox" aria-label="分段列表" data-i18n-aria-label="segment.list"></div>
+        <div class="segment-actions">
+          <label for="split-frame" data-i18n="segment.split_frame">拆分帧</label>
+          <input id="split-frame" type="number" min="1" step="1" inputmode="numeric">
+          <button id="split-btn" type="button" data-i18n="segment.split">拆分</button>
+          <button id="merge-btn" type="button" data-i18n="segment.merge">合并下一段</button>
+        </div>
+      </section>
+      <p class="source-safety" data-i18n="source.external_safe">外部源照片始终保留</p>
+    </aside>
 
-    <main>
+    <main id="studio-main" class="studio-main">
+      <div id="error-banner" class="error-banner" role="alert" hidden>
+        <span id="error-message"></span>
+        <button id="dismiss-error-btn" class="icon-button" type="button" aria-label="关闭错误提示" title="关闭" data-i18n-aria-label="error.dismiss" data-i18n-title="error.dismiss">&#10005;</button>
+      </div>
+
       <section id="view-workbench" class="view is-active" role="tabpanel" tabindex="0" aria-labelledby="tab-workbench" data-view-panel="workbench">
         <section class="source-band" aria-labelledby="source-heading">
-          <div>
-            <h1 id="source-heading">素材</h1>
-            <p id="source-summary" class="summary-line">选择包含 ARW、JPG 或 JPEG 的目录。</p>
-          </div>
+          <div><h1 id="source-heading" data-i18n="source.title">素材</h1><p id="source-summary" class="summary-line" data-i18n="source.help">选择包含 ARW、JPG 或 JPEG 的目录。</p></div>
           <div class="command-row">
-            <button id="pick-source-btn" type="button">选择目录</button>
-            <button id="scan-btn" class="primary-button" type="button">扫描素材</button>
-            <button id="clear-project-btn" class="danger-quiet-button" type="button">清除当前项目</button>
+            <button id="pick-source-btn" type="button" data-i18n="source.pick">选择目录</button>
+            <button id="scan-btn" class="primary-button" type="button" data-i18n="source.scan">扫描素材</button>
+            <button id="clear-project-btn" class="danger-quiet-button" type="button" data-i18n="source.clear">清除当前项目</button>
           </div>
         </section>
 
-        <section class="workspace-grid" aria-label="分段工作区">
-          <aside class="segments-pane">
-            <div class="pane-heading">
-              <div>
-                <h2>分段</h2>
-                <span id="segment-count" class="muted">0 段</span>
-              </div>
-              <div class="icon-cluster" aria-label="调整分段顺序">
-                <button id="move-up-btn" class="icon-button" type="button" title="上移分段" aria-label="上移分段">&#8593;</button>
-                <button id="move-down-btn" class="icon-button" type="button" title="下移分段" aria-label="下移分段">&#8595;</button>
-              </div>
-            </div>
-            <div id="segment-list" class="segment-list" role="listbox" aria-label="分段列表"></div>
-            <div class="segment-actions">
-              <label for="split-frame">拆分帧</label>
-              <input id="split-frame" type="number" min="1" step="1" inputmode="numeric">
-              <button id="split-btn" type="button">拆分</button>
-              <button id="merge-btn" type="button">合并下一段</button>
-            </div>
-          </aside>
-
-          <section class="detail-pane" aria-labelledby="detail-heading">
-            <div class="detail-toolbar">
-              <label class="name-field" for="segment-name">
-                <span id="detail-heading">当前分段</span>
-                <input id="segment-name" type="text" maxlength="80" autocomplete="off" placeholder="选择一个分段">
-              </label>
-              <span id="segment-status" class="status-pill" data-status="idle">未选择</span>
-            </div>
-
-            <div class="preview-analysis-grid">
-              <figure class="preview-stage">
-                <div id="segment-preview" class="preview-surface" aria-label="当前分段预览">
-                  <span>暂无预览</span>
-                </div>
-                <figcaption id="preview-caption">选择分段后查看代表帧</figcaption>
-              </figure>
-              <section class="chart-panel" aria-labelledby="chart-heading">
-                <div class="section-heading-row">
-                  <h3 id="chart-heading">亮度曲线</h3>
-                  <span id="chart-legend" class="muted">原始 / 目标 / 增益</span>
-                </div>
-                <canvas id="brightness-chart" width="720" height="220" aria-label="亮度、目标亮度和增益曲线"></canvas>
-              </section>
-            </div>
-
-            <section class="recipe-panel" aria-labelledby="recipe-heading">
-              <div class="section-heading-row">
-                <h3 id="recipe-heading">处理配方</h3>
-                <div id="recipe-mode" class="segmented-control" role="group" aria-label="处理模式">
-                  <button type="button" data-recipe="natural" aria-pressed="true">自然</button>
-                  <button type="button" data-recipe="clear">通透</button>
-                  <button type="button" data-recipe="punchy">强化</button>
-                  <button type="button" data-recipe="custom">自定义</button>
-                </div>
-              </div>
-              <div class="control-grid">
-                <label for="recipe-select">配方
-                  <select id="recipe-select">
-                    <option value="natural">自然</option>
-                    <option value="clear">通透</option>
-                    <option value="punchy">色彩强化</option>
-                    <option value="custom">自定义</option>
-                  </select>
-                </label>
-                <label for="recipe-strength">配方强度 <output id="recipe-strength-value">100%</output>
-                  <input id="recipe-strength" type="range" min="0" max="150" value="100">
-                </label>
-                <label for="golden-strength">日照金山强度 <output id="golden-strength-value">0%</output>
-                  <input id="golden-strength" type="range" min="0" max="150" value="0">
-                </label>
-                <label class="toggle-field" for="deflicker-enabled">
-                  <input id="deflicker-enabled" type="checkbox" checked>
-                  <span>启用去闪</span>
-                </label>
-              </div>
-
-              <details id="advanced-settings" class="advanced-settings">
-                <summary>高级参数</summary>
-                <div class="control-grid advanced-grid">
-                  <label for="deflicker-window">去闪窗口
-                    <input id="deflicker-window" type="number" min="3" max="129" step="2" value="15">
-                  </label>
-                  <label for="gain-limit">曝光增益上限
-                    <input id="gain-limit" type="number" min="1" max="8" step="0.1" value="2">
-                  </label>
-                  <label for="golden-start">强化起始帧
-                    <input id="golden-start" type="number" min="0" step="1">
-                  </label>
-                  <label for="golden-end">强化结束帧
-                    <input id="golden-end" type="number" min="0" step="1">
-                  </label>
-                </div>
-              </details>
+        <section class="detail-pane" aria-labelledby="detail-heading">
+          <div class="detail-toolbar">
+            <label class="name-field" for="segment-name"><span id="detail-heading" data-i18n="segment.current">当前分段</span><input id="segment-name" type="text" maxlength="80" autocomplete="off" placeholder="选择一个分段" data-i18n-placeholder="segment.select"></label>
+            <span id="segment-status" class="status-pill" data-status="idle" data-i18n="segment.none">未选择</span>
+          </div>
+          <div class="preview-analysis-grid">
+            <figure class="preview-stage">
+              <div id="segment-preview" class="preview-surface" aria-label="当前分段预览" data-i18n-aria-label="preview.current"><span data-i18n="preview.none">暂无预览</span></div>
+              <figcaption id="preview-caption" data-i18n="preview.select">选择分段后查看代表帧</figcaption>
+            </figure>
+            <section class="chart-panel" aria-labelledby="chart-heading">
+              <div class="section-heading-row"><h3 id="chart-heading" data-i18n="chart.title">亮度曲线</h3><span id="chart-legend" class="muted" data-i18n="chart.legend">原始 / 目标 / 增益</span></div>
+              <canvas id="brightness-chart" width="720" height="220" aria-label="亮度、目标亮度和增益曲线" data-i18n-aria-label="chart.aria"></canvas>
             </section>
+          </div>
+
+          <section class="recipe-panel" aria-labelledby="recipe-heading">
+            <div class="section-heading-row">
+              <h3 id="recipe-heading" data-i18n="recipe.title">处理配方</h3>
+              <div id="recipe-mode" class="segmented-control" role="group" aria-label="处理模式" data-i18n-aria-label="recipe.mode">
+                <button type="button" data-recipe="natural" aria-pressed="true" data-i18n="recipe.natural">自然</button>
+                <button type="button" data-recipe="clear" data-i18n="recipe.clear">通透</button>
+                <button type="button" data-recipe="punchy" data-i18n="recipe.punchy">色彩强化</button>
+                <button type="button" data-recipe="custom" data-i18n="recipe.custom">自定义</button>
+              </div>
+            </div>
+            <div class="control-grid">
+              <label for="recipe-select"><span data-i18n="recipe.mode">处理模式</span><select id="recipe-select"><option value="natural" data-i18n="recipe.natural">自然</option><option value="clear" data-i18n="recipe.clear">通透</option><option value="punchy" data-i18n="recipe.punchy">色彩强化</option><option value="custom" data-i18n="recipe.custom">自定义</option></select></label>
+              <label for="recipe-strength"><span><span data-i18n="recipe.strength">配方强度</span> <output id="recipe-strength-value">100%</output></span><input id="recipe-strength" type="range" min="0" max="150" value="100"></label>
+              <label for="golden-strength"><span><span data-i18n="recipe.golden">日照金山强度</span> <output id="golden-strength-value">0%</output></span><input id="golden-strength" type="range" min="0" max="150" value="0"></label>
+              <label class="toggle-field" for="deflicker-enabled"><input id="deflicker-enabled" type="checkbox" checked><span data-i18n="recipe.deflicker">启用去闪</span></label>
+            </div>
+            <details id="advanced-settings" class="advanced-settings">
+              <summary data-i18n="recipe.advanced">高级参数</summary>
+              <div class="control-grid advanced-grid">
+                <label for="deflicker-window"><span data-i18n="recipe.window">去闪窗口</span><input id="deflicker-window" type="number" min="3" max="129" step="2" value="15"></label>
+                <label for="gain-limit"><span data-i18n="recipe.gain_limit">曝光增益上限</span><input id="gain-limit" type="number" min="1" max="8" step="0.1" value="2"></label>
+                <label for="golden-start"><span data-i18n="recipe.golden_start">强化起始帧</span><input id="golden-start" type="number" min="0" step="1"></label>
+                <label for="golden-end"><span data-i18n="recipe.golden_end">强化结束帧</span><input id="golden-end" type="number" min="0" step="1"></label>
+              </div>
+            </details>
           </section>
         </section>
 
         <section class="frame-band" aria-labelledby="frames-heading">
           <div class="frame-toolbar">
-            <div>
-              <h2 id="frames-heading">帧检查</h2>
-              <span id="frame-selection-summary" class="muted">未选择帧</span>
-            </div>
+            <div><h2 id="frames-heading" data-i18n="frames.title">帧检查</h2><span id="frame-selection-summary" class="muted" data-i18n="frames.none_selected">未选择帧</span></div>
             <div class="command-row compact-row">
-              <button id="frame-page-prev" class="icon-button" type="button" title="上一页" aria-label="上一页缩略图">&#8249;</button>
+              <button id="frame-page-prev" class="icon-button" type="button" title="上一页" aria-label="上一页缩略图" data-i18n-title="frames.previous" data-i18n-aria-label="frames.previous">&#8249;</button>
               <span id="frame-page-label" class="page-label">0 / 0</span>
-              <button id="frame-page-next" class="icon-button" type="button" title="下一页" aria-label="下一页缩略图">&#8250;</button>
-              <button id="bad-frame-btn" type="button">标记坏帧</button>
-              <button id="unmark-bad-frame-btn" type="button">取消坏帧</button>
-              <button id="set-golden-start-btn" type="button">设为强化起点</button>
-              <button id="set-golden-end-btn" type="button">设为强化终点</button>
+              <button id="frame-page-next" class="icon-button" type="button" title="下一页" aria-label="下一页缩略图" data-i18n-title="frames.next" data-i18n-aria-label="frames.next">&#8250;</button>
+              <button id="bad-frame-btn" type="button" data-i18n="frames.mark_bad">标记坏帧</button>
+              <button id="unmark-bad-frame-btn" type="button" data-i18n="frames.unmark_bad">取消坏帧</button>
+              <button id="set-golden-start-btn" type="button" data-i18n="frames.set_golden_start">设为强化起点</button>
+              <button id="set-golden-end-btn" type="button" data-i18n="frames.set_golden_end">设为强化终点</button>
             </div>
           </div>
-          <div id="frame-strip" class="frame-strip" aria-label="分段缩略图带"></div>
+          <div id="frame-strip" class="frame-strip" aria-label="分段缩略图带" data-i18n-aria-label="frames.strip"></div>
         </section>
 
         <section class="output-band" aria-labelledby="output-heading">
-          <div>
-            <h2 id="output-heading">最终导出</h2>
-            <p class="summary-line">逐段生成最终视频；预览与最终成片分开保存。</p>
-          </div>
+          <div><h2 id="output-heading" data-i18n="export.title">最终导出</h2><p class="summary-line" data-i18n="export.help">逐段生成最终视频；预览与最终成片分开保存。</p></div>
           <div class="export-controls">
-            <label for="export-fps">帧率
-              <select id="export-fps">
-                <option>24</option><option>25</option><option selected>30</option><option>50</option><option>60</option>
-              </select>
-            </label>
-            <label for="export-resolution">分辨率
-              <select id="export-resolution">
-                <option value="1080p">1080p</option><option value="4k" selected>4K</option><option value="source">原图宽度</option>
-              </select>
-            </label>
-            <label for="export-codec">编码
-              <select id="export-codec"><option value="h264">H.264</option><option value="h265">H.265</option></select>
-            </label>
-            <label for="export-crf">CRF
-              <input id="export-crf" type="number" min="0" max="51" value="18">
-            </label>
-            <button id="export-btn" class="primary-button" type="button">导出视频</button>
-            <button id="archive-btn" type="button">归档成果</button>
+            <label for="export-fps"><span data-i18n="export.fps">帧率</span><select id="export-fps"><option value="24">24</option><option value="25">25</option><option value="30" selected>30</option><option value="60">60</option></select></label>
+            <label for="export-resolution"><span data-i18n="export.resolution">分辨率</span><select id="export-resolution"><option value="1080p">1080p</option><option value="4k" selected>4K</option><option value="source" data-i18n="export.source_width">原图宽度</option></select></label>
+            <label for="export-codec"><span data-i18n="export.codec">编码</span><select id="export-codec"><option value="h264">H.264</option><option value="h265">H.265</option></select></label>
+            <label for="export-crf"><span data-i18n="export.crf">CRF</span><input id="export-crf" type="number" min="0" max="51" value="18"></label>
+            <button id="export-btn" class="primary-button" type="button" data-i18n="export.start">导出视频</button>
+            <button id="archive-btn" type="button" data-i18n="archive.start">归档成果</button>
           </div>
         </section>
       </section>
 
       <section id="view-history" class="view" role="tabpanel" tabindex="0" aria-labelledby="tab-history" data-view-panel="history" hidden>
-        <header class="page-heading">
-          <div><h1>历史归档</h1><p class="summary-line">预览视频与最终成片分别列出。</p></div>
-          <button id="refresh-history-btn" type="button">刷新</button>
-        </header>
+        <header class="page-heading"><div><h1 data-i18n="history.title">历史归档</h1><p class="summary-line" data-i18n="history.help">预览视频与最终成片分别列出。</p></div><button id="refresh-history-btn" type="button" data-i18n="history.refresh">刷新</button></header>
         <div id="history-list" class="history-list" aria-live="polite"></div>
       </section>
 
       <section id="view-settings" class="view" role="tabpanel" tabindex="0" aria-labelledby="tab-settings" data-view-panel="settings" hidden>
-        <header class="page-heading"><div><h1>设置</h1><p class="summary-line">设置只保存到本机配置。</p></div></header>
+        <header class="page-heading"><div><h1 data-i18n="settings.title">设置</h1><p class="summary-line" data-i18n="settings.help">设置只保存到本机配置。</p></div></header>
         <form id="settings-form" class="settings-form">
-          <fieldset class="directory-settings">
-            <legend>本机目录</legend>
-            <label for="settings-workspace-dir">工作目录
-              <span class="directory-picker"><input id="settings-workspace-dir" name="workspace_dir" type="text" readonly><button type="button" data-settings-directory="workspace" title="选择工作目录" aria-label="选择工作目录">选择</button></span>
-            </label>
-            <label for="settings-output-dir">输出目录
-              <span class="directory-picker"><input id="settings-output-dir" name="output_dir" type="text" readonly><button type="button" data-settings-directory="output" title="选择输出目录" aria-label="选择输出目录">选择</button></span>
-            </label>
-            <label for="settings-archive-dir">归档目录
-              <span class="directory-picker"><input id="settings-archive-dir" name="archive_dir" type="text" readonly><button type="button" data-settings-directory="archive" title="选择归档目录" aria-label="选择归档目录">选择</button></span>
-            </label>
+          <fieldset class="directory-settings"><legend data-i18n="settings.directories">目录</legend>
+            <label for="settings-workspace-dir"><span data-i18n="settings.workspace">工作目录</span><span class="directory-picker"><input id="settings-workspace-dir" name="workspace_dir" type="text" readonly><button type="button" data-settings-directory="workspace" title="选择工作目录" aria-label="选择工作目录" data-i18n="settings.pick">选择</button></span></label>
+            <label for="settings-output-dir"><span data-i18n="settings.output">输出目录</span><span class="directory-picker"><input id="settings-output-dir" name="output_dir" type="text" readonly><button type="button" data-settings-directory="output" title="选择输出目录" aria-label="选择输出目录" data-i18n="settings.pick">选择</button></span></label>
+            <label for="settings-archive-dir"><span data-i18n="settings.archive">归档目录</span><span class="directory-picker"><input id="settings-archive-dir" name="archive_dir" type="text" readonly><button type="button" data-settings-directory="archive" title="选择归档目录" aria-label="选择归档目录" data-i18n="settings.pick">选择</button></span></label>
           </fieldset>
-          <fieldset>
-            <legend>默认处理</legend>
-            <label for="settings-default-recipe">默认配方
-              <select id="settings-default-recipe" name="processing.default_recipe">
-                <option value="natural">自然</option><option value="clear">通透</option><option value="punchy">色彩强化</option>
-              </select>
-            </label>
-            <label for="settings-gap-seconds">自动分段间隔（秒）
-              <input id="settings-gap-seconds" name="scan.gap_seconds" type="number" min="1" value="120">
-            </label>
+          <fieldset><legend data-i18n="settings.processing">处理</legend>
+            <label for="settings-default-recipe"><span data-i18n="settings.default_recipe">默认配方</span><select id="settings-default-recipe" name="processing.default_recipe"><option value="natural" data-i18n="recipe.natural">自然</option><option value="clear" data-i18n="recipe.clear">通透</option><option value="punchy" data-i18n="recipe.punchy">色彩强化</option><option value="custom" data-i18n="recipe.custom">自定义</option></select></label>
+            <label for="settings-gap-seconds"><span data-i18n="settings.gap">自动分段时间间隔（秒）</span><input id="settings-gap-seconds" name="scan.gap_seconds" type="number" min="1" value="120"></label>
           </fieldset>
-          <fieldset>
-            <legend>预览</legend>
-            <label for="settings-preview-fps">帧率
-              <input id="settings-preview-fps" name="preview.fps" type="number" min="1" max="60" value="30">
-            </label>
-            <label for="settings-preview-width">宽度
-              <input id="settings-preview-width" name="preview.width" type="number" min="640" max="3840" step="16" value="1920">
-            </label>
+          <fieldset><legend data-i18n="settings.preview">预览</legend>
+            <label for="settings-preview-fps"><span data-i18n="settings.preview_fps">预览帧率</span><input id="settings-preview-fps" name="preview.fps" type="number" min="1" max="60" value="30"></label>
+            <label for="settings-preview-width"><span data-i18n="settings.preview_width">预览宽度</span><input id="settings-preview-width" name="preview.width" type="number" min="640" max="3840" step="16" value="1920"></label>
           </fieldset>
-          <fieldset>
-            <legend>最终导出</legend>
-            <label for="settings-export-resolution">分辨率
-              <select id="settings-export-resolution" name="export.resolution"><option value="1080p">1080p</option><option value="4k">4K</option><option value="source">原图宽度</option></select>
-            </label>
-            <label for="settings-export-codec">编码
-              <select id="settings-export-codec" name="export.codec"><option value="h264">H.264</option><option value="h265">H.265</option></select>
-            </label>
-            <label for="settings-export-crf">CRF
-              <input id="settings-export-crf" name="export.crf" type="number" min="0" max="51" value="18">
-            </label>
+          <fieldset><legend data-i18n="settings.export">导出</legend>
+            <label for="settings-export-resolution"><span data-i18n="export.resolution">分辨率</span><select id="settings-export-resolution" name="export.resolution"><option value="1080p">1080p</option><option value="4k">4K</option><option value="source" data-i18n="export.source_width">原图宽度</option></select></label>
+            <label for="settings-export-codec"><span data-i18n="export.codec">编码</span><select id="settings-export-codec" name="export.codec"><option value="h264">H.264</option><option value="h265">H.265</option></select></label>
+            <label for="settings-export-crf"><span data-i18n="export.crf">CRF</span><input id="settings-export-crf" name="export.crf" type="number" min="0" max="51" value="18"></label>
           </fieldset>
-          <div class="form-actions"><button id="save-settings-btn" class="primary-button" type="submit">保存设置</button><span id="settings-save-status" class="save-status" role="status" aria-live="polite"></span></div>
+          <div class="form-actions"><button id="save-settings-btn" class="primary-button" type="submit" data-i18n="settings.save">保存设置</button><span id="settings-save-status" class="save-status" role="status" aria-live="polite"></span></div>
         </form>
       </section>
     </main>
 
-    <footer id="task-bar" class="task-bar" aria-label="任务状态栏">
+    <footer id="task-bar" class="task-bar" aria-label="任务状态栏" data-i18n-aria-label="task.bar">
       <div class="task-actions">
-        <button id="process-btn" class="primary-button" type="button">开始处理</button>
-        <label for="retry-stage" class="visually-compact">重跑阶段</label>
-        <select id="retry-stage"><option value="render">重新渲染</option><option value="analyze">重新分析并渲染</option></select>
-        <button id="retry-btn" type="button">重跑</button>
-        <button id="cancel-btn" class="danger-quiet-button" type="button" disabled>取消</button>
+        <button id="process-btn" class="primary-button" type="button" data-i18n="task.start">开始处理</button>
+        <label for="retry-stage" class="visually-compact"><span data-i18n="task.retry_stage">重跑阶段</span><select id="retry-stage"><option value="render" data-i18n="task.retry_render">重新渲染</option><option value="analyze" data-i18n="task.retry_analyze">重新分析并渲染</option></select></label>
+        <button id="retry-btn" type="button" data-i18n="task.retry">重跑</button>
+        <button id="cancel-btn" class="danger-quiet-button" type="button" disabled data-i18n="task.cancel">取消</button>
       </div>
       <div class="task-progress-block">
-        <div class="task-copy"><strong id="task-status">空闲</strong><span id="task-current">等待任务</span><span id="task-percent">0%</span></div>
-        <progress id="task-progress" role="progressbar" aria-label="任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" max="100" value="0">0%</progress>
+        <div class="task-copy"><strong id="task-status" data-i18n="status.idle">空闲</strong><span id="task-current" data-i18n="task.waiting">等待任务</span><span id="task-percent">0%</span></div>
+        <progress id="task-progress" role="progressbar" aria-label="任务进度" data-i18n-aria-label="task.progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" max="100" value="0">0%</progress>
       </div>
-      <details class="task-log-details">
-        <summary>任务日志</summary>
-        <pre id="task-log" aria-live="polite">暂无日志</pre>
-      </details>
+      <details class="task-log-details"><summary data-i18n="task.logs">任务日志</summary><pre id="task-log" aria-live="polite" data-i18n="task.no_logs">暂无日志</pre></details>
     </footer>
   </div>
 
-  <dialog id="archive-dialog" class="confirm-dialog" aria-labelledby="archive-dialog-title">
-    <form method="dialog">
-      <h2 id="archive-dialog-title">确认归档</h2>
-      <p>归档会复制配方、分析、成片和项目记录，验证成功后清空当前工作区。外部源照片始终保留，不会移动、改名或删除。</p>
-      <div class="dialog-actions">
-        <button id="archive-cancel-btn" value="cancel">取消</button>
-        <button id="archive-confirm-btn" class="primary-button" value="confirm">确认归档</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog id="clear-project-dialog" class="confirm-dialog" aria-labelledby="clear-dialog-title">
-    <form method="dialog">
-      <h2 id="clear-dialog-title">清除当前项目</h2>
-      <p>这会清理当前工作区，但不会触碰源照片、最终输出或历史归档。</p>
-      <div class="dialog-actions">
-        <button id="clear-cancel-btn" value="cancel">取消</button>
-        <button id="clear-confirm-btn" class="danger-button" value="confirm">确认清除</button>
-      </div>
-    </form>
-  </dialog>
-
-  <script src="/app.js" defer></script>
+  <dialog id="archive-dialog" class="confirm-dialog" aria-labelledby="archive-dialog-title"><form method="dialog"><h2 id="archive-dialog-title" data-i18n="dialog.archive.title">确认归档</h2><p data-i18n="dialog.archive.body">归档会校验并保存当前 JPEG、预览视频和最终成片，随后清理工作目录。外部源照片始终保留。</p><div class="dialog-actions"><button id="archive-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="archive-confirm-btn" class="primary-button" value="confirm" data-i18n="dialog.archive.confirm">确认归档</button></div></form></dialog>
+  <dialog id="clear-project-dialog" class="confirm-dialog" aria-labelledby="clear-dialog-title"><form method="dialog"><h2 id="clear-dialog-title" data-i18n="dialog.clear.title">清除当前项目</h2><p data-i18n="dialog.clear.body">这会清除当前工作目录中的项目状态和处理结果，不会删除外部源照片。</p><div class="dialog-actions"><button id="clear-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="clear-confirm-btn" class="danger-button" value="confirm" data-i18n="dialog.clear.confirm">确认清除</button></div></form></dialog>
 </body>
 </html>
