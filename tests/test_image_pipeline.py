@@ -48,12 +48,65 @@ class ImagePipelineTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def _analysis_for(self, frames=None, gains=None):
+        frames = frames or self.frames
+        gains = gains or [1.0] * len(frames)
+        return {
+            "frame_count": len(frames),
+            "gain": gains,
+            "sources": [image_pipeline._source_identity(path.resolve()) for path in frames],
+        }
+
+    def _install_old_analysis(self, work_dir):
+        version = work_dir / ".analysis_versions" / "old-version"
+        thumbnails = version / "thumbnails"
+        thumbnails.mkdir(parents=True)
+        thumbnail = thumbnails / "000000.jpg"
+        thumbnail.write_bytes(b"old-thumbnail")
+        representative = version / "representative.jpg"
+        representative.write_bytes(b"old-representative")
+        old = {
+            "old": True,
+            "thumbnails": [{"path": ".analysis_versions/old-version/thumbnails/000000.jpg"}],
+            "representative_frame": {
+                "thumbnail": ".analysis_versions/old-version/thumbnails/000000.jpg",
+                "image": ".analysis_versions/old-version/representative.jpg",
+            },
+        }
+        analysis_path = work_dir / "analysis.json"
+        analysis_path.write_text(json.dumps(old), encoding="utf-8")
+        return old, thumbnail, representative
+
     def test_analyze_segment_writes_atomic_analysis_and_preserves_sources(self):
         before = {path: _digest(path) for path in self.frames}
+        source_names = {path.name for path in self.source.iterdir()}
         work_dir = self.root / "segment-work"
+        work_dir.mkdir()
+        old_analysis, old_thumbnail, old_representative = self._install_old_analysis(work_dir)
         progress_calls = []
+        commit_observed = []
+        real_replace = os.replace
 
-        with mock.patch("src.image_pipeline.os.replace", wraps=os.replace) as replace:
+        def commit(source, destination):
+            self.assertEqual(Path(destination), work_dir / "analysis.json")
+            self.assertEqual(
+                json.loads((work_dir / "analysis.json").read_text(encoding="utf-8")),
+                old_analysis,
+            )
+            candidate = json.loads(Path(source).read_text(encoding="utf-8"))
+            for thumbnail in candidate["thumbnails"]:
+                self.assertTrue((work_dir / thumbnail["path"]).is_file())
+            self.assertTrue((work_dir / candidate["representative_frame"]["image"]).is_file())
+            self.assertFalse((work_dir / "thumbnails").exists())
+            self.assertFalse((work_dir / "representative.jpg").exists())
+            real_replace(source, destination)
+            self.assertEqual(
+                json.loads((work_dir / "analysis.json").read_text(encoding="utf-8")),
+                candidate,
+            )
+            commit_observed.append(True)
+
+        with mock.patch("src.image_pipeline.os.replace", side_effect=commit) as replace:
             result = image_pipeline.analyze_segment(
                 self.segment,
                 self.recipe,
@@ -64,8 +117,10 @@ class ImagePipelineTests(unittest.TestCase):
 
         analysis_path = work_dir / "analysis.json"
         self.assertTrue(analysis_path.is_file())
-        replace.assert_called_once_with(work_dir / "analysis.json.tmp", analysis_path)
-        self.assertFalse((work_dir / "analysis.json.tmp").exists())
+        self.assertEqual(replace.call_count, 1)
+        self.assertEqual(commit_observed, [True])
+        self.assertTrue(old_thumbnail.is_file())
+        self.assertTrue(old_representative.is_file())
         self.assertEqual(json.loads(analysis_path.read_text(encoding="utf-8")), result)
         self.assertEqual(result["frame_count"], 8)
         self.assertEqual(len(result["measured_luminance"]), 8)
@@ -77,14 +132,22 @@ class ImagePipelineTests(unittest.TestCase):
         self.assertEqual(result["sources"][0]["name"], self.frames[0].name)
         self.assertIn("size", result["sources"][0])
         self.assertIn("mtime_ns", result["sources"][0])
+        self.assertIn("anomaly_candidates", result)
+        self.assertEqual(sum(result["histogram_summary"]["counts"]), 8 * 4 * 5)
+        self.assertEqual(len(result["thumbnails"]), 8)
+        self.assertTrue((work_dir / result["representative_frame"]["thumbnail"]).is_file())
+        self.assertTrue((work_dir / result["representative_frame"]["image"]).is_file())
+        for thumbnail in result["thumbnails"]:
+            self.assertTrue((work_dir / thumbnail["path"]).is_file())
         self.assertEqual(progress_calls[-1][0:2], (8, 8))
         self.assertEqual(before, {path: _digest(path) for path in self.frames})
+        self.assertEqual(source_names, {path.name for path in self.source.iterdir()})
 
     def test_analyze_cancellation_does_not_replace_previous_analysis(self):
         work_dir = self.root / "segment-work"
         work_dir.mkdir()
         analysis_path = work_dir / "analysis.json"
-        analysis_path.write_text('{"old": true}', encoding="utf-8")
+        old_analysis, old_thumbnail, representative = self._install_old_analysis(work_dir)
         checks = iter((False, False, True))
 
         with self.assertRaises(image_pipeline.TaskCancelled):
@@ -96,7 +159,61 @@ class ImagePipelineTests(unittest.TestCase):
                 lambda: next(checks, True),
             )
 
-        self.assertEqual(analysis_path.read_text(encoding="utf-8"), '{"old": true}')
+        self.assertEqual(json.loads(analysis_path.read_text(encoding="utf-8")), old_analysis)
+        self.assertEqual(old_thumbnail.read_bytes(), b"old-thumbnail")
+        self.assertEqual(representative.read_bytes(), b"old-representative")
+
+    def test_analysis_publish_failure_restores_old_analysis_and_thumbnails(self):
+        work_dir = self.root / "segment-work"
+        work_dir.mkdir()
+        analysis_path = work_dir / "analysis.json"
+        old_analysis, old_thumbnail, representative = self._install_old_analysis(work_dir)
+        old_versions = set((work_dir / ".analysis_versions").iterdir())
+
+        def fail_new_analysis(source, destination):
+            candidate = json.loads(Path(source).read_text(encoding="utf-8"))
+            for thumbnail in candidate["thumbnails"]:
+                self.assertTrue((work_dir / thumbnail["path"]).is_file())
+            self.assertEqual(
+                json.loads(analysis_path.read_text(encoding="utf-8")), old_analysis
+            )
+            raise OSError("analysis publication failed")
+
+        with mock.patch("src.image_pipeline.os.replace", side_effect=fail_new_analysis) as replace:
+            with self.assertRaisesRegex(OSError, "analysis publication failed"):
+                image_pipeline.analyze_segment(
+                    self.segment, self.recipe, work_dir, lambda *a, **k: None, lambda: False
+                )
+
+        self.assertEqual(replace.call_count, 1)
+        self.assertEqual(json.loads(analysis_path.read_text(encoding="utf-8")), old_analysis)
+        self.assertEqual(old_thumbnail.read_bytes(), b"old-thumbnail")
+        self.assertEqual(representative.read_bytes(), b"old-representative")
+        self.assertEqual(set((work_dir / ".analysis_versions").iterdir()), old_versions)
+        self.assertFalse((work_dir / "thumbnails").exists())
+        self.assertFalse((work_dir / "representative.jpg").exists())
+
+    def test_post_commit_fsync_failure_keeps_committed_version_available(self):
+        work_dir = self.root / "segment-work"
+        work_dir.mkdir()
+
+        def fail_after_commit(path):
+            if Path(path) == work_dir:
+                raise OSError("post-commit fsync failed")
+
+        with mock.patch("src.image_pipeline._fsync_directory", side_effect=fail_after_commit):
+            with self.assertRaisesRegex(OSError, "post-commit fsync failed"):
+                image_pipeline.analyze_segment(
+                    self.segment, self.recipe, work_dir, lambda *a, **k: None, lambda: False
+                )
+
+        committed = json.loads((work_dir / "analysis.json").read_text(encoding="utf-8"))
+        self.assertEqual(committed["frame_count"], 8)
+        for thumbnail in committed["thumbnails"]:
+            self.assertTrue((work_dir / thumbnail["path"]).is_file())
+        representative = committed["representative_frame"]
+        self.assertTrue((work_dir / representative["thumbnail"]).is_file())
+        self.assertTrue((work_dir / representative["image"]).is_file())
 
     def test_render_saves_once_per_kept_frame_and_excludes_rejected(self):
         before = {path: _digest(path) for path in self.frames}
@@ -134,7 +251,7 @@ class ImagePipelineTests(unittest.TestCase):
 
     def test_render_applies_combined_gain_then_grade_then_golden(self):
         one_frame = {**self.segment, "frames": [str(self.frames[0])]}
-        analysis = {"frame_count": 1, "gain": [1.1], "sources": [{"path": str(self.frames[0].resolve())}]}
+        analysis = self._analysis_for([self.frames[0]], [1.1])
         recipe = {
             "grade": {"style": "natural"},
             "enhance_golden": {"enable": True, "strength": 0.8, "core": [1, 1], "ramp": 0},
@@ -173,8 +290,7 @@ class ImagePipelineTests(unittest.TestCase):
         result_dir.mkdir(parents=True)
         old = result_dir / "old.jpg"
         old.write_bytes(b"previous-result")
-        analysis = {"frame_count": 8, "gain": [1.0] * 8,
-                    "sources": [{"path": str(path.resolve())} for path in self.frames]}
+        analysis = self._analysis_for()
         real_load = image_ops.load_image
         calls = 0
 
@@ -200,8 +316,7 @@ class ImagePipelineTests(unittest.TestCase):
         result_dir.mkdir(parents=True)
         old = result_dir / "old.jpg"
         old.write_bytes(b"previous-result")
-        analysis = {"frame_count": 8, "gain": [1.0] * 8,
-                    "sources": [{"path": str(path.resolve())} for path in self.frames]}
+        analysis = self._analysis_for()
         real_replace = os.replace
         publication_attempted = False
 
@@ -229,8 +344,7 @@ class ImagePipelineTests(unittest.TestCase):
         result_dir.mkdir(parents=True)
         old = result_dir / "old.jpg"
         old.write_bytes(b"previous-result")
-        analysis = {"frame_count": 8, "gain": [1.0] * 8,
-                    "sources": [{"path": str(path.resolve())} for path in self.frames]}
+        analysis = self._analysis_for()
         checks = iter((False, True))
 
         with self.assertRaises(image_pipeline.TaskCancelled):
@@ -245,6 +359,68 @@ class ImagePipelineTests(unittest.TestCase):
 
         self.assertEqual(old.read_bytes(), b"previous-result")
         self.assertEqual(list(target.glob(".rendering-*")), [])
+
+    def test_render_rejects_changed_source_identity_and_keeps_result(self):
+        target = self.root / "render-target"
+        result_dir = target / "result"
+        result_dir.mkdir(parents=True)
+        old = result_dir / "old.jpg"
+        old.write_bytes(b"previous-result")
+        analysis = self._analysis_for()
+        _write_frame(self.frames[0], 200)
+
+        with self.assertRaisesRegex(ValueError, "source identity"):
+            image_pipeline.render_segment(
+                self.segment, self.recipe, analysis, target, lambda *a, **k: None, lambda: False
+            )
+
+        self.assertEqual(old.read_bytes(), b"previous-result")
+        self.assertEqual(list(target.glob(".rendering-*")), [])
+
+    def test_source_identity_path_comparison_is_case_insensitive_on_windows(self):
+        analysis = self._analysis_for()
+        for source in analysis["sources"]:
+            source["path"] = source["path"].swapcase()
+
+        result = image_pipeline.render_segment(
+            self.segment,
+            self.recipe,
+            analysis,
+            self.root / "render-target",
+            lambda *a, **k: None,
+            lambda: False,
+        )
+
+        self.assertEqual(result.frame_count, 8)
+
+    def test_each_kept_frame_decodes_once_and_rejected_frame_is_not_decoded(self):
+        analysis = self._analysis_for()
+        recipe = dict(self.recipe)
+        recipe["deglare"] = {"enable": True, "reject": [self.frames[3].stem]}
+        target = self.root / "render-target"
+
+        with mock.patch("src.image_pipeline.load_image", wraps=image_ops.load_image) as decode:
+            image_pipeline.render_segment(
+                self.segment, recipe, analysis, target, lambda *a, **k: None, lambda: False
+            )
+
+        decoded = [Path(call.args[0]).name for call in decode.call_args_list]
+        self.assertEqual(len(decoded), 7)
+        self.assertNotIn(self.frames[3].name, decoded)
+        self.assertEqual(len(decoded), len(set(decoded)))
+
+    def test_non_finite_analysis_gain_is_rejected_before_render(self):
+        target = self.root / "render-target"
+        with self.assertRaises(ValueError):
+            image_pipeline.render_segment(
+                self.segment,
+                self.recipe,
+                self._analysis_for(gains=[1.0] * 7 + [np.nan]),
+                target,
+                lambda *a, **k: None,
+                lambda: False,
+            )
+        self.assertFalse((target / "result").exists())
 
 
 if __name__ == "__main__":

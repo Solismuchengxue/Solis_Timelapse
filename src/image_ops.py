@@ -16,6 +16,38 @@ GOLDEN_STRENGTH = {"mild": 0.55, "medium": 0.85, "strong": 1.20}
 _GAMMA = {"srgb": (2.222, 4.5), "linear": (1.0, 1.0)}
 
 
+def _finite_number(
+    value: float, name: str, minimum: float | None = None, maximum: float | None = None
+) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a finite number") from error
+    if not np.isfinite(number):
+        raise ValueError(f"{name} must be a finite number")
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and number > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return number
+
+
+def _finite_rgb(rgb: np.ndarray) -> np.ndarray:
+    array = np.asarray(rgb, dtype=np.float32)
+    if array.ndim < 1 or array.shape[-1] != 3 or array.size == 0:
+        raise ValueError("RGB image must be non-empty and have three channels")
+    if not np.isfinite(array).all():
+        raise ValueError("RGB image contains non-finite pixels")
+    return array
+
+
+def _window_size(window: int) -> int:
+    number = _finite_number(window, "median window", 1, 1001)
+    if not number.is_integer():
+        raise ValueError("median window must be an integer")
+    return int(number)
+
+
 def frame_num(path: str | Path) -> int:
     """Extract the numeric part of a frame name, or -1 when absent."""
     base = Path(path).stem
@@ -35,6 +67,8 @@ def decode_raw(
     half: bool = False,
 ) -> np.ndarray:
     import rawpy
+
+    bright = _finite_number(bright, "RAW brightness", 0.01, 16.0)
 
     with rawpy.imread(str(path)) as raw:
         return raw.postprocess(
@@ -73,20 +107,26 @@ def load_image(
 
 
 def measure_luminance(rgb: np.ndarray) -> float:
-    return float(np.asarray(rgb, dtype=np.float64).mean())
+    return float(_finite_rgb(rgb).mean(dtype=np.float64))
 
 
 def save_jpeg(rgb: np.ndarray, path: str | Path, quality: int = 95) -> None:
     output = Path(path)
-    Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)).save(
-        output, format="JPEG", quality=quality
+    quality_value = _finite_number(quality, "JPEG quality", 1, 100)
+    if not quality_value.is_integer():
+        raise ValueError("JPEG quality must be an integer")
+    Image.fromarray(np.clip(_finite_rgb(rgb), 0, 255).astype(np.uint8)).save(
+        output, format="JPEG", quality=int(quality_value)
     )
 
 
 def smooth_median(values: np.ndarray | list[float], window: int) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
-    if window < 1:
-        raise ValueError("median window must be at least 1")
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("luminance must be a non-empty one-dimensional sequence")
+    if not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError("luminance values must be finite and non-negative")
+    window = _window_size(window)
     half = window // 2
     output = np.empty(len(values), dtype=np.float64)
     for index in range(len(values)):
@@ -100,15 +140,33 @@ def exposure_gain(
     luminance: np.ndarray | list[float], window: int, clip: tuple[float, float] | list[float]
 ) -> np.ndarray:
     luminance = np.asarray(luminance, dtype=np.float64)
+    if luminance.ndim != 1 or luminance.size == 0:
+        raise ValueError("luminance must be a non-empty one-dimensional sequence")
+    if not np.isfinite(luminance).all() or np.any(luminance < 0):
+        raise ValueError("luminance values must be finite and non-negative")
+    if not isinstance(clip, (tuple, list)) or len(clip) != 2:
+        raise ValueError("gain clip must contain lower and upper bounds")
+    lower = _finite_number(clip[0], "gain clip lower bound", 1e-6, 16.0)
+    upper = _finite_number(clip[1], "gain clip upper bound", 1e-6, 16.0)
+    if lower > upper:
+        raise ValueError("gain clip lower bound must not exceed upper bound")
     target = smooth_median(luminance, window)
-    return np.clip(target / np.maximum(luminance, 1e-6), clip[0], clip[1])
+    gain = np.clip(target / np.maximum(luminance, 1e-6), lower, upper)
+    if not np.isfinite(gain).all():
+        raise ValueError("calculated exposure gain is not finite")
+    return gain
 
 
 def apply_gain(rgb: np.ndarray, gain: float) -> np.ndarray:
-    return np.clip(np.asarray(rgb, dtype=np.float32) * float(gain), 0, 255)
+    gain = _finite_number(gain, "exposure gain", 0.0, 16.0)
+    return np.clip(_finite_rgb(rgb) * gain, 0, 255)
 
 
 def grade(rgb: np.ndarray, sat: float, con: float, pivot: float) -> np.ndarray:
+    rgb = _finite_rgb(rgb)
+    sat = _finite_number(sat, "saturation", 0.0, 4.0)
+    con = _finite_number(con, "contrast", 0.0, 4.0)
+    pivot = _finite_number(pivot, "grade pivot", 0.0, 255.0)
     gray = rgb.mean(axis=2, keepdims=True)
     output = gray + (rgb - gray) * sat
     output = (output - pivot) * con + pivot
@@ -118,6 +176,8 @@ def grade(rgb: np.ndarray, sat: float, con: float, pivot: float) -> np.ndarray:
 def grade_by_style(
     rgb: np.ndarray, style: str, overrides: dict | None = None
 ) -> np.ndarray:
+    if overrides is not None and not isinstance(overrides, dict):
+        raise ValueError("grade overrides must be a mapping")
     parameters = dict(GRADE_PRESETS.get(style, GRADE_PRESETS["none"]))
     parameters.update(
         {
@@ -130,6 +190,7 @@ def grade_by_style(
 
 
 def rgb2hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rgb = _finite_rgb(rgb)
     r, g, b = rgb[..., 0] / 255.0, rgb[..., 1] / 255.0, rgb[..., 2] / 255.0
     maximum = np.maximum(np.maximum(r, g), b)
     minimum = np.minimum(np.minimum(r, g), b)
@@ -150,6 +211,17 @@ def rgb2hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def hsv2rgb(hue: np.ndarray, saturation: np.ndarray, value: np.ndarray) -> np.ndarray:
+    hue = np.asarray(hue, dtype=np.float64)
+    saturation = np.asarray(saturation, dtype=np.float64)
+    value = np.asarray(value, dtype=np.float64)
+    if not (np.isfinite(hue).all() and np.isfinite(saturation).all() and np.isfinite(value).all()):
+        raise ValueError("HSV values must be finite")
+    if np.any(hue < 0) or np.any(hue > 1):
+        raise ValueError("hue must be between 0 and 1")
+    if np.any(saturation < 0) or np.any(saturation > 1):
+        raise ValueError("saturation must be between 0 and 1")
+    if np.any(value < 0) or np.any(value > 1):
+        raise ValueError("value must be between 0 and 1")
     hue6 = (hue * 6.0) % 6
     sector = np.floor(hue6).astype(int)
     fraction = hue6 - sector
@@ -164,6 +236,8 @@ def hsv2rgb(hue: np.ndarray, saturation: np.ndarray, value: np.ndarray) -> np.nd
 
 def enhance_golden(rgb: np.ndarray, strength: float) -> np.ndarray:
     """Enhance warm lit areas while separating cooler environmental shadows."""
+    rgb = _finite_rgb(rgb)
+    strength = _finite_number(strength, "golden strength", 0.0, 4.0)
     if strength <= 0:
         return rgb
     hue, saturation, value = rgb2hsv(rgb)
@@ -185,7 +259,17 @@ def enhance_golden(rgb: np.ndarray, strength: float) -> np.ndarray:
 def golden_ramp_strength(
     number: int, core: tuple[int, int] | list[int], ramp: int, full: float
 ) -> float:
-    low, high = core
+    if not isinstance(core, (tuple, list)) or len(core) != 2:
+        raise ValueError("golden core must contain start and end frame numbers")
+    low = _finite_number(core[0], "golden core start")
+    high = _finite_number(core[1], "golden core end")
+    if not low.is_integer() or not high.is_integer() or low > high:
+        raise ValueError("golden core must be an ordered integer frame range")
+    ramp_value = _finite_number(ramp, "golden ramp", 0.0)
+    if not ramp_value.is_integer():
+        raise ValueError("golden ramp must be an integer")
+    full = _finite_number(full, "golden strength", 0.0, 4.0)
+    low, high, ramp = int(low), int(high), int(ramp_value)
     if low <= number <= high:
         return float(full)
     if ramp <= 0:

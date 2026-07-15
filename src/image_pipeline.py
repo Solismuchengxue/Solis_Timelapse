@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+from PIL import Image
 
 from .image_ops import (
     GOLDEN_STRENGTH,
@@ -66,12 +67,73 @@ def _source_identity(path: Path) -> dict:
     }
 
 
+def _path_key(path: str | Path) -> str:
+    return os.path.normpath(str(Path(path).resolve())).casefold()
+
+
+def _same_identity(expected: dict, actual: dict) -> bool:
+    try:
+        return (
+            _path_key(expected["path"]) == _path_key(actual["path"])
+            and int(expected["size"]) == int(actual["size"])
+            and int(expected["mtime_ns"]) == int(actual["mtime_ns"])
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _thumbnail(rgb: np.ndarray, width: int = 320, height: int = 180) -> np.ndarray:
+    pixels = np.clip(rgb, 0, 255).astype(np.uint8)
+    image = Image.fromarray(pixels)
+    image.thumbnail((width, height), Image.Resampling.LANCZOS)
+    return np.asarray(image, dtype=np.float32)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("r+b") as source:
+        os.fsync(source.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory fsync; Windows may not allow directory handles."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+    finally:
+        os.close(descriptor)
+
+
+def _anomaly_candidates(
+    paths: list[Path], luminance: np.ndarray, gains: np.ndarray, threshold: float = 0.05
+) -> list[dict]:
+    candidates = []
+    for index, (path, measured, gain) in enumerate(zip(paths, luminance, gains)):
+        if abs(float(gain) - 1.0) >= threshold:
+            candidates.append(
+                {
+                    "index": index,
+                    "path": str(path),
+                    "name": path.name,
+                    "measured_luminance": float(measured),
+                    "gain": float(gain),
+                    "reason": "exposure_gain",
+                }
+            )
+    return candidates
+
+
 def _gains(luminance: np.ndarray, recipe: dict) -> tuple[np.ndarray, np.ndarray]:
     combined = np.ones(len(luminance), dtype=np.float64)
     target = luminance.copy()
     deflicker = recipe.get("deflicker", {})
     if deflicker.get("enable", True):
-        window = int(deflicker.get("window", 11))
+        window = deflicker.get("window", 11)
         target = smooth_median(luminance, window)
         combined *= exposure_gain(
             luminance,
@@ -82,7 +144,7 @@ def _gains(luminance: np.ndarray, recipe: dict) -> tuple[np.ndarray, np.ndarray]
     lift_dark = recipe.get("lift_dark", {})
     if lift_dark.get("enable", False):
         corrected = luminance * combined
-        window = int(lift_dark.get("window", 15))
+        window = lift_dark.get("window", 15)
         target = smooth_median(corrected, window)
         combined *= exposure_gain(
             corrected,
@@ -99,42 +161,98 @@ def analyze_segment(
     progress: Callable,
     cancelled: Callable,
 ) -> dict:
-    """Measure source frames at half resolution and atomically publish analysis."""
+    """Measure sources and transactionally publish analysis UI assets."""
     paths = _frame_paths(segment)
     decode = recipe.get("decode", {})
-    luminance = []
-    sources = []
-    for index, path in enumerate(paths, start=1):
-        _check_cancelled(cancelled)
-        rgb = load_image(path, decode, half=True)
-        luminance.append(measure_luminance(rgb))
-        sources.append(_source_identity(path))
-        progress(index, len(paths), frame=str(path))
-
-    measured = np.asarray(luminance, dtype=np.float64)
-    gain, target = _gains(measured, recipe)
-    analysis = {
-        "schema_version": 1,
-        "segment_id": segment.get("id"),
-        "frame_count": len(paths),
-        "sources": sources,
-        "measured_luminance": measured.tolist(),
-        "target_luminance": target.tolist(),
-        "gain": gain.tolist(),
-    }
-
-    _check_cancelled(cancelled)
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    destination = work_dir / "analysis.json"
-    temporary = work_dir / "analysis.json.tmp"
+    version_id = uuid.uuid4().hex
+    version_relative = f".analysis_versions/{version_id}"
+    versions_dir = work_dir / ".analysis_versions"
+    version_dir = versions_dir / version_id
+    thumbnail_dir = version_dir / "thumbnails"
+    luminance = []
+    sources = []
+    thumbnails = []
+    histogram_counts = np.zeros(32, dtype=np.int64)
+    histogram_edges = np.linspace(0.0, 256.0, 33)
+    committed = False
     try:
+        thumbnail_dir.mkdir(parents=True)
+        for index, path in enumerate(paths):
+            _check_cancelled(cancelled)
+            identity = _source_identity(path)
+            rgb = load_image(path, decode, half=True)
+            measured_value = measure_luminance(rgb)
+            if not _same_identity(identity, _source_identity(path)):
+                raise ValueError(f"source identity changed during analysis: {path.name}")
+            luminance.append(measured_value)
+            sources.append(identity)
+            gray = rgb.mean(axis=2)
+            counts, _ = np.histogram(gray, bins=histogram_edges)
+            histogram_counts += counts
+            relative = f"{version_relative}/thumbnails/{index:06d}.jpg"
+            thumbnail_path = work_dir / relative
+            save_jpeg(_thumbnail(rgb), thumbnail_path, quality=82)
+            _fsync_file(thumbnail_path)
+            thumbnails.append(
+                {"index": index, "source": str(path), "name": path.name, "path": relative}
+            )
+            progress(index + 1, len(paths), frame=str(path))
+
+        measured = np.asarray(luminance, dtype=np.float64)
+        gain, target = _gains(measured, recipe)
+        representative_index = int(np.argmin(np.abs(measured - np.median(measured))))
+        representative_thumbnail = thumbnails[representative_index]["path"]
+        representative_relative = f"{version_relative}/representative.jpg"
+        representative_path = work_dir / representative_relative
+        shutil.copy2(work_dir / representative_thumbnail, representative_path)
+        _fsync_file(representative_path)
+        _fsync_directory(thumbnail_dir)
+        _fsync_directory(version_dir)
+        _fsync_directory(versions_dir)
+        analysis = {
+            "schema_version": 1,
+            "segment_id": segment.get("id"),
+            "frame_count": len(paths),
+            "sources": sources,
+            "measured_luminance": measured.tolist(),
+            "target_luminance": target.tolist(),
+            "gain": gain.tolist(),
+            "anomaly_candidates": _anomaly_candidates(paths, measured, gain),
+            "histogram_summary": {
+                "bins": histogram_edges.tolist(),
+                "counts": histogram_counts.tolist(),
+                "sample_count": int(histogram_counts.sum()),
+            },
+            "asset_version": version_relative,
+            "thumbnails": thumbnails,
+            "representative_frame": {
+                "index": representative_index,
+                "source": str(paths[representative_index]),
+                "name": paths[representative_index].name,
+                "thumbnail": representative_thumbnail,
+                "image": representative_relative,
+            },
+        }
+
+        _check_cancelled(cancelled)
+        temporary = work_dir / f".analysis-{version_id}.json.tmp"
         with temporary.open("w", encoding="utf-8", newline="\n") as output:
-            json.dump(analysis, output, ensure_ascii=False, indent=2)
+            json.dump(analysis, output, ensure_ascii=False, indent=2, allow_nan=False)
             output.write("\n")
-        os.replace(temporary, destination)
-    finally:
+            output.flush()
+            os.fsync(output.fileno())
+        _check_cancelled(cancelled)
+        os.replace(temporary, work_dir / "analysis.json")
+        committed = True
+        _fsync_directory(work_dir)
+    except BaseException:
+        temporary = work_dir / f".analysis-{version_id}.json.tmp"
         temporary.unlink(missing_ok=True)
+        if not committed and version_dir.exists():
+            shutil.rmtree(version_dir)
+        raise
     return analysis
 
 
@@ -156,18 +274,25 @@ def _rejected_names(segment: dict, recipe: dict) -> set[str]:
 def _analysis_gain_by_path(paths: list[Path], analysis: dict) -> list[float]:
     gains = analysis.get("gain", [])
     sources = analysis.get("sources", [])
+    if analysis.get("frame_count") != len(paths):
+        raise ValueError("analysis frame count does not match segment")
     if len(gains) != len(paths):
         raise ValueError("analysis frame count does not match segment")
-    if not sources:
-        return [float(value) for value in gains]
     if len(sources) != len(paths):
         raise ValueError("analysis source count does not match segment")
-
-    expected = [str(path.resolve()).casefold() for path in paths]
-    actual = [str(Path(item["path"]).resolve()).casefold() for item in sources]
-    if actual != expected:
-        raise ValueError("analysis sources do not match segment frame order")
-    return [float(value) for value in gains]
+    validated_gains = []
+    for path, source, gain in zip(paths, sources, gains):
+        current = _source_identity(path)
+        if not _same_identity(source, current):
+            raise ValueError(f"source identity does not match analysis: {path.name}")
+        try:
+            gain = float(gain)
+        except (TypeError, ValueError) as error:
+            raise ValueError("analysis gain must be a finite number") from error
+        if not np.isfinite(gain) or gain < 0 or gain > 16:
+            raise ValueError("analysis gain must be finite and between 0 and 16")
+        validated_gains.append(gain)
+    return validated_gains
 
 
 def _golden_strength(recipe: dict, path: Path) -> float:
@@ -184,7 +309,7 @@ def _golden_strength(recipe: dict, path: Path) -> float:
     if not core:
         return full
     return golden_ramp_strength(
-        frame_num(path), core, int(settings.get("ramp", 10)), full
+        frame_num(path), core, settings.get("ramp", 10), full
     )
 
 
@@ -224,10 +349,12 @@ def render_segment(
     configured_grade = recipe.get("grade", {})
     if isinstance(configured_grade, str):
         grade_settings = {"style": configured_grade}
-    else:
+    elif isinstance(configured_grade, dict):
         grade_settings = configured_grade
+    else:
+        raise ValueError("grade settings must be a mapping or style name")
     style = grade_settings.get("style", recipe.get("style", "none"))
-    quality = int(recipe.get("jpeg_quality", recipe.get("quality", 95)))
+    quality = recipe.get("jpeg_quality", recipe.get("quality", 95))
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     temporary = target_dir / f".rendering-{uuid.uuid4().hex}"
