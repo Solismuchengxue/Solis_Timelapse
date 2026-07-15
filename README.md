@@ -24,6 +24,18 @@ Solis_Timelapse 是面向 RAW/JPEG 照片序列的延时摄影处理工具。它
 
 以后再次双击 `run.bat` 即可启动。关闭启动窗口会停止 WebUI。
 
+### 迁移到最终项目目录
+
+需要将旧项目目录迁移到 `F:\01_Project\Solis_Timelapse` 时，双击根目录的 `migrate_to_new_path.bat`。独立迁移窗口出现后关闭 Codex，脚本会等待旧目录解锁，然后完成整体移动、Git 校验和旧路径兼容联接。
+
+迁移成功后，从 Codex 打开以下规范路径：
+
+```text
+F:\01_Project\Solis_Timelapse
+```
+
+Codex 的历史对话和长期记忆保存在用户目录的 `.codex` 数据中，脚本不会修改这些文件。旧路径会保留为指向新路径的兼容 junction，供已有任务继续解析原工作目录。
+
 在工作台中依次完成以下操作：
 
 1. 选择照片目录并扫描素材。
