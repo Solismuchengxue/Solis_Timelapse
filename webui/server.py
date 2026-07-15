@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -20,6 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import archive, config_io, image_pipeline, media_catalog, video_export
 from src.project_store import ProjectStore
+from src.runtime_env import (
+    RuntimeEnvironment,
+    load_runtime_environment,
+    validate_runtime_environment,
+)
 from src.task_manager import (
     ACTIVE_STATES,
     TaskBusy,
@@ -56,6 +62,27 @@ def _safe_media_path(root: Path, relative: str, suffixes: set[str], allowed: Cal
     if not candidate.is_file() or candidate.suffix.casefold() not in suffixes or not allowed(candidate):
         return None
     return candidate
+
+
+def _safe_input_directory(root: Path, relative: str) -> tuple[Path, str] | None:
+    if not isinstance(relative, str) or "\x00" in relative or "\\" in relative:
+        return None
+    windows_path = PureWindowsPath(relative)
+    native_path = Path(relative)
+    if windows_path.drive or windows_path.root or native_path.is_absolute():
+        return None
+    if any(part in {".", ".."} for part in native_path.parts):
+        return None
+    try:
+        base = Path(root).resolve(strict=True)
+        candidate = (base / native_path).resolve(strict=True)
+        resolved_relative = candidate.relative_to(base)
+    except (OSError, ValueError):
+        return None
+    if not candidate.is_dir():
+        return None
+    value = "" if resolved_relative == Path(".") else resolved_relative.as_posix()
+    return candidate, value
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
@@ -313,18 +340,28 @@ def _frame_rejections(segment: dict, values: Any) -> list[str]:
 
 def create_app(overrides: dict | None = None) -> Flask:
     runtime = dict(overrides or {})
-    settings = config_io.load_config(local_path=Path(runtime.get("local_config_path", config_io.LOCAL_PATH)))
+    runtime_environment = runtime.get("runtime_environment")
+    if runtime_environment is None:
+        runtime_environment = load_runtime_environment(os.environ, config_io.ROOT)
+    if not isinstance(runtime_environment, RuntimeEnvironment):
+        raise TypeError("runtime_environment must be a RuntimeEnvironment")
+    local_config_path = Path(runtime.get("local_config_path", runtime_environment.local_config_path)).resolve()
+    settings = config_io.load_config(local_path=local_config_path)
     startup_configured_roots = _configured_roots(settings)
+    environment_roots = {
+        "workspace_dir": runtime_environment.workspace_dir,
+        "output_dir": runtime_environment.output_dir,
+        "archive_dir": runtime_environment.archive_dir,
+    } if runtime_environment.mode == "container" else settings
     effective_roots = {
-        "workspace_dir": _configured_root(runtime.get("workspace_dir", settings["workspace_dir"])),
-        "output_dir": _configured_root(runtime.get("output_dir", settings["output_dir"])),
-        "archive_dir": _configured_root(runtime.get("archive_dir", settings["archive_dir"])),
+        "workspace_dir": _configured_root(runtime.get("workspace_dir", environment_roots["workspace_dir"])),
+        "output_dir": _configured_root(runtime.get("output_dir", environment_roots["output_dir"])),
+        "archive_dir": _configured_root(runtime.get("archive_dir", environment_roots["archive_dir"])),
     }
     _validate_runtime_roots(effective_roots)
     workspace = effective_roots["workspace_dir"]
     output = effective_roots["output_dir"]
     archive_dir = effective_roots["archive_dir"]
-    local_config_path = Path(runtime.get("local_config_path", config_io.LOCAL_PATH)).resolve()
     store = ProjectStore(workspace)
     tasks = TaskManager(workspace / "task.json")
 
@@ -338,6 +375,7 @@ def create_app(overrides: dict | None = None) -> Flask:
     }
     app.extensions["timelapse_store"] = store
     app.extensions["timelapse_tasks"] = tasks
+    app.extensions["solis_runtime"] = runtime_environment
 
     def active_task() -> bool:
         return tasks.snapshot().get("status") in ACTIVE_STATES
@@ -347,6 +385,11 @@ def create_app(overrides: dict | None = None) -> Flask:
             raise TaskBusy("another task is already active")
 
     def validate_source_dir(source: Path, roots: dict[str, Path] = effective_roots) -> None:
+        if runtime_environment.input_root is not None:
+            try:
+                source.resolve().relative_to(runtime_environment.input_root.resolve(strict=True))
+            except (OSError, ValueError):
+                raise ApiError("素材目录超出容器输入目录", "invalid_media_path") from None
         if any(_paths_overlap(source, root) for root in roots.values()):
             raise ApiError("素材目录不能与工作目录重叠", "unsafe_source_dir")
 
@@ -455,8 +498,56 @@ def create_app(overrides: dict | None = None) -> Flask:
             "capabilities": {"raw": True, "export": ["h264", "h265"]},
         })
 
+    @app.get("/api/capabilities")
+    def api_capabilities():
+        return jsonify({
+            "mode": runtime_environment.mode,
+            "native_directory_picker": runtime_environment.native_picker,
+            "directory_browser": runtime_environment.input_root is not None,
+        })
+
+    @app.get("/api/health")
+    def api_health():
+        issues = validate_runtime_environment(runtime_environment)
+        if issues:
+            return jsonify({
+                "status": "error",
+                "code": "runtime_unavailable",
+                "issues": issues,
+            }), 503
+        return jsonify({"status": "ok"})
+
+    @app.get("/api/directories")
+    def api_directories():
+        if runtime_environment.input_root is None:
+            return _error("当前模式不提供素材目录浏览", "invalid_media_path", 400)
+        safe = _safe_input_directory(runtime_environment.input_root, request.args.get("path", ""))
+        if safe is None:
+            return _error("素材目录无效", "invalid_media_path", 400)
+        directory, relative = safe
+        directories = []
+        try:
+            children = sorted(
+                (child for child in directory.iterdir() if child.is_dir()),
+                key=lambda child: child.name.casefold(),
+            )
+        except OSError:
+            return _error("素材目录无法访问", "invalid_media_path", 400)
+        for child in children:
+            child_safe = _safe_input_directory(runtime_environment.input_root, f"{relative}/{child.name}".strip("/"))
+            if child_safe is None:
+                continue
+            child_relative = child_safe[1]
+            directories.append({"name": child.name, "path": child_relative})
+        parent = Path(relative).parent.as_posix() if relative else ""
+        if parent == ".":
+            parent = ""
+        return jsonify({"path": relative, "parent": parent, "directories": directories})
+
     @app.post("/api/pick-directory")
     def api_pick_directory():
+        if not runtime_environment.native_picker:
+            return _error("当前模式不支持本机目录选择器", "native_picker_unavailable", 409)
         picker = runtime.get("directory_picker")
         if picker is not None:
             selected = picker()

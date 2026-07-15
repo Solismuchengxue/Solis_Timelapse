@@ -196,6 +196,14 @@
     </footer>
   </div>
 
+  <dialog id="directory-browser-dialog" class="confirm-dialog directory-browser-dialog" aria-labelledby="directory-browser-title">
+    <div class="directory-browser-content">
+      <div class="section-heading-row"><h2 id="directory-browser-title" data-i18n="browser.title">选择素材目录</h2><button id="directory-browser-close" class="icon-button" type="button" data-i18n-title="dialog.cancel" data-i18n-aria-label="dialog.cancel">&#10005;</button></div>
+      <nav id="directory-browser-breadcrumb" class="directory-browser-breadcrumb" aria-label="素材目录路径" data-i18n-aria-label="browser.breadcrumb"></nav>
+      <div id="directory-browser-list" class="directory-browser-list"></div>
+      <div class="dialog-actions"><button id="directory-browser-cancel" type="button" data-i18n="dialog.cancel">取消</button><button id="directory-browser-choose" class="primary-button" type="button" data-i18n="browser.choose">选择当前目录</button></div>
+    </div>
+  </dialog>
   <dialog id="archive-dialog" class="confirm-dialog" aria-labelledby="archive-dialog-title"><form method="dialog"><h2 id="archive-dialog-title" data-i18n="dialog.archive.title">确认归档</h2><p data-i18n="dialog.archive.body">归档会校验并保存当前 JPEG、预览视频和最终成片，随后清理工作目录。外部源照片始终保留。</p><div class="dialog-actions"><button id="archive-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="archive-confirm-btn" class="primary-button" value="confirm" data-i18n="dialog.archive.confirm">确认归档</button></div></form></dialog>
   <dialog id="clear-project-dialog" class="confirm-dialog" aria-labelledby="clear-dialog-title"><form method="dialog"><h2 id="clear-dialog-title" data-i18n="dialog.clear.title">清除当前项目</h2><p data-i18n="dialog.clear.body">这会清除当前工作目录中的项目状态和处理结果，不会删除外部源照片。</p><div class="dialog-actions"><button id="clear-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="clear-confirm-btn" class="danger-button" value="confirm" data-i18n="dialog.clear.confirm">确认清除</button></div></form></dialog>
 </body>

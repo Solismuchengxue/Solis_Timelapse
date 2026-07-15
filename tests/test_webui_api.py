@@ -11,6 +11,7 @@ from urllib.parse import quote
 from PIL import Image
 
 from webui.server import create_app
+from src.runtime_env import RuntimeEnvironment
 
 
 class WebUiApiTests(unittest.TestCase):
@@ -94,6 +95,95 @@ class WebUiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"SolisUI", response.data)
         response.close()
+
+    def test_local_capabilities_keep_native_picker(self):
+        response = self.client.get("/api/capabilities")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "mode": "local",
+            "native_directory_picker": True,
+            "directory_browser": False,
+        })
+
+    def test_container_health_capabilities_and_directory_browser_are_confined(self):
+        input_root = self.root / "media-input"
+        (input_root / "trip" / "day1").mkdir(parents=True)
+        (input_root / "trip" / "frame.jpg").write_bytes(b"jpeg")
+        outside_link_target = self.root / "outside-link-target"
+        outside_link_target.mkdir()
+        symlink_created = False
+        try:
+            (input_root / "escape").symlink_to(outside_link_target, target_is_directory=True)
+            symlink_created = True
+        except OSError:
+            pass
+        for name in ("container-workspace", "container-output", "container-archive", "container-config"):
+            (self.root / name).mkdir()
+        runtime = RuntimeEnvironment(
+            mode="container",
+            input_root=input_root,
+            workspace_dir=self.root / "container-workspace",
+            output_dir=self.root / "container-output",
+            archive_dir=self.root / "container-archive",
+            local_config_path=self.root / "container-config" / "local.yaml",
+            host="0.0.0.0",
+            native_picker=False,
+        )
+        app = create_app({"TESTING": True, "runtime_environment": runtime})
+        client = app.test_client()
+        try:
+            self.assertEqual(client.get("/api/health").get_json(), {"status": "ok"})
+            self.assertEqual(client.get("/api/capabilities").get_json(), {
+                "mode": "container",
+                "native_directory_picker": False,
+                "directory_browser": True,
+            })
+            listing = client.get("/api/directories", query_string={"path": "trip"})
+            self.assertEqual(listing.status_code, 200)
+            self.assertEqual(listing.get_json(), {
+                "path": "trip",
+                "parent": "",
+                "directories": [{"name": "day1", "path": "trip/day1"}],
+            })
+            picker = client.post("/api/pick-directory")
+            self.assertEqual(picker.status_code, 409)
+            self.assertEqual(picker.get_json()["code"], "native_picker_unavailable")
+            for value in ("../", "/etc", r"C:\Users", r"\\server\share"):
+                response = client.get("/api/directories", query_string={"path": value})
+                self.assertEqual(response.status_code, 400, value)
+                self.assertEqual(response.get_json()["code"], "invalid_media_path")
+            if symlink_created:
+                response = client.get("/api/directories", query_string={"path": "escape"})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["code"], "invalid_media_path")
+        finally:
+            app.extensions["timelapse_tasks"].shutdown()
+
+    def test_container_scan_rejects_source_outside_input_mount(self):
+        input_root = self.root / "media-input-restricted"
+        input_root.mkdir()
+        outside = self.root / "outside-input"
+        outside.mkdir()
+        for name in ("restricted-workspace", "restricted-output", "restricted-archive", "restricted-config"):
+            (self.root / name).mkdir()
+        runtime = RuntimeEnvironment(
+            mode="container",
+            input_root=input_root,
+            workspace_dir=self.root / "restricted-workspace",
+            output_dir=self.root / "restricted-output",
+            archive_dir=self.root / "restricted-archive",
+            local_config_path=self.root / "restricted-config" / "local.yaml",
+            host="0.0.0.0",
+            native_picker=False,
+        )
+        app = create_app({"TESTING": True, "runtime_environment": runtime})
+        try:
+            response = app.test_client().post("/api/project/scan", json={"source_dir": str(outside)})
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()["code"], "invalid_media_path")
+        finally:
+            app.extensions["timelapse_tasks"].shutdown()
 
     def test_configured_runtime_roots_must_not_overlap(self):
         with self.assertRaisesRegex(ValueError, "overlap"):

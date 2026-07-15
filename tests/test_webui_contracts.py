@@ -21,7 +21,9 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertTrue(PREFS_PATH.is_file())
         for required_id in (
             "theme-select", "language-select", "sidebar-nav",
-            "studio-main", "task-bar",
+            "studio-main", "task-bar", "directory-browser-dialog",
+            "directory-browser-breadcrumb", "directory-browser-list",
+            "directory-browser-choose",
         ):
             self.assertIn(f'id="{required_id}"', self.html)
         self.assertIn('data-theme="system"', self.html)

@@ -2,6 +2,8 @@
 
 const API = Object.freeze({
   state: "/api/state",
+  capabilities: "/api/capabilities",
+  directories: "/api/directories",
   pickDirectory: "/api/pick-directory",
   scan: "/api/project/scan",
   project: "/api/project",
@@ -42,7 +44,9 @@ const state = {
   pollingTimer: null,
   recipeSaveTimer: null,
   recipeSavePromise: Promise.resolve(),
-  pendingRecipe: null
+  pendingRecipe: null,
+  capabilities: { mode: "local", native_directory_picker: true, directory_browser: false },
+  directoryBrowserPath: ""
 };
 
 const byId = (id) => document.getElementById(id);
@@ -514,15 +518,94 @@ function handleTabKeydown(event) {
   switchView(tabs[nextIndex].dataset.view);
 }
 
+function chooseDirectoryMode(capabilities) {
+  return capabilities?.native_directory_picker ? "native" : "browser";
+}
+
+async function loadCapabilities() {
+  state.capabilities = await api(API.capabilities);
+  document.querySelectorAll("[data-settings-directory]").forEach((button) => {
+    button.disabled = !state.capabilities.native_directory_picker;
+  });
+}
+
+function containerSourcePath(relative) {
+  return relative ? `/media/input/${relative}` : "/media/input";
+}
+
+function renderDirectoryBrowser(payload) {
+  state.directoryBrowserPath = payload.path || "";
+  const breadcrumb = byId("directory-browser-breadcrumb");
+  breadcrumb.replaceChildren();
+  const rootButton = document.createElement("button");
+  rootButton.type = "button";
+  rootButton.dataset.directoryPath = "";
+  rootButton.textContent = t("browser.root");
+  breadcrumb.append(rootButton);
+  const parts = state.directoryBrowserPath.split("/").filter(Boolean);
+  parts.forEach((part, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.directoryPath = parts.slice(0, index + 1).join("/");
+    button.textContent = part;
+    breadcrumb.append(button);
+  });
+
+  const list = byId("directory-browser-list");
+  list.replaceChildren();
+  if (!payload.directories?.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = t("browser.empty");
+    list.append(empty);
+    return;
+  }
+  payload.directories.forEach((directory) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "directory-row";
+    button.dataset.directoryPath = directory.path;
+    const icon = document.createElement("span");
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "▸";
+    const label = document.createElement("span");
+    label.textContent = directory.name;
+    button.append(icon, label);
+    list.append(button);
+  });
+}
+
+async function openDirectoryBrowser(relative = "") {
+  try {
+    clearError();
+    const payload = await api(`${API.directories}?${new URLSearchParams({ path: relative })}`);
+    renderDirectoryBrowser(payload);
+    const dialog = byId("directory-browser-dialog");
+    if (!dialog.open) dialog.showModal();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function chooseBrowsedDirectory() {
+  state.pendingSourcePath = containerSourcePath(state.directoryBrowserPath);
+  byId("directory-browser-dialog").close();
+  renderSource();
+  renderActionAvailability();
+}
+
 async function pickDirectory() {
   try {
     clearError();
-    const result = await api(API.pickDirectory, { method: "POST" });
-    if (result.path) {
-      state.pendingSourcePath = result.path;
-      renderSource();
-      renderActionAvailability();
+    if (chooseDirectoryMode(state.capabilities) === "browser") {
+      await openDirectoryBrowser("");
+      return;
     }
+    const result = await api(API.pickDirectory, { method: "POST" });
+    if (!result.path) return;
+    state.pendingSourcePath = result.path;
+    renderSource();
+    renderActionAvailability();
   } catch (error) { showError(error); }
 }
 
@@ -972,18 +1055,32 @@ function bindEvents() {
   document.querySelectorAll("[data-settings-directory]").forEach((button) => button.addEventListener("click", () => pickSettingsDirectory(button.dataset.settingsDirectory)));
   byId("theme-select").addEventListener("change", (event) => applyTheme(event.target.value));
   byId("language-select").addEventListener("change", (event) => applyLanguage(event.target.value));
+  byId("directory-browser-breadcrumb").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-directory-path]");
+    if (button) openDirectoryBrowser(button.dataset.directoryPath);
+  });
+  byId("directory-browser-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-directory-path]");
+    if (button) openDirectoryBrowser(button.dataset.directoryPath);
+  });
+  byId("directory-browser-choose").addEventListener("click", chooseBrowsedDirectory);
+  byId("directory-browser-cancel").addEventListener("click", () => byId("directory-browser-dialog").close());
+  byId("directory-browser-close").addEventListener("click", () => byId("directory-browser-dialog").close());
   window.addEventListener("resize", drawChart);
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if (preferences.theme === "system") drawChart();
   });
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   byId("theme-select").value = preferences.theme;
   byId("language-select").value = preferences.language;
   translateDocument();
   bindEvents();
+  try { await loadCapabilities(); } catch (error) { showError(error); }
   renderFrameStrip();
   drawChart();
   refreshState();
 });
+
+window.SolisAppTest = { chooseDirectoryMode, containerSourcePath };

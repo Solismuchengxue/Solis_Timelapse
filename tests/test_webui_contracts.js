@@ -46,7 +46,7 @@ for (const id of [
 }
 
 for (const route of [
-  "/api/state", "/api/pick-directory", "/api/project/scan",
+  "/api/state", "/api/capabilities", "/api/directories", "/api/pick-directory", "/api/project/scan",
   "/api/segments/split", "/api/segments/merge", "/api/segments/reorder",
   "/api/process", "/api/process/retry", "/api/tasks/cancel",
   "/api/tasks/current", "/api/export", "/api/archive", "/api/history",
@@ -90,5 +90,10 @@ assert(html.includes('id="settings-workspace-dir" name="workspace_dir" type="tex
 for (const token of ["theme-select", "language-select", "solis:themechange", "solis:languagechange"]) {
   assert(html.includes(token) || js.includes(token), `Missing UI preference wiring: ${token}`);
 }
+for (const id of ["directory-browser-dialog", "directory-browser-breadcrumb", "directory-browser-list", "directory-browser-choose"]) {
+  assert(ids.includes(id), `Missing Docker directory browser #${id}`);
+}
+assert(js.includes("function chooseDirectoryMode(capabilities)"), "Picker mode must be capability driven");
+assert(js.includes("state.capabilities.native_directory_picker"), "Native picker capability must be checked");
 assert(!js.includes("正在读取历史..."), "Dynamic copy must come from i18n");
 console.log("WebUI static contracts passed");
