@@ -3,6 +3,7 @@ DEVLOG.md
 .agents/
 .claude/
 .codex/
+.worktrees/
 
 # Python/runtime files
 __pycache__/
