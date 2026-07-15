@@ -1,0 +1,25 @@
+# Local agent context
+DEVLOG.md
+.agents/
+.claude/
+.codex/
+
+# Python/runtime files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.log
+*.concat.txt
+
+# Local media and processing data
+00_dist/*
+!00_dist/.gitkeep
+01_input/*
+!01_input/.gitkeep
+03_preview/*
+!03_preview/.gitkeep
+04_output/*
+!04_output/.gitkeep
+05_archive/*
+!05_archive/.gitkeep

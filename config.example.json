@@ -1,0 +1,32 @@
+{
+  "type": "raw",
+  "decode": {
+    "bright": 3.5,
+    "wb": "camera",
+    "gamma": "srgb"
+  },
+  "deflicker": {
+    "enable": true,
+    "window": 11,
+    "clip": [0.85, 1.2]
+  },
+  "deglare": {
+    "enable": false,
+    "reject": []
+  },
+  "lift_dark": {
+    "enable": false,
+    "window": 15,
+    "clip": [0.7, 1.7]
+  },
+  "grade": {
+    "style": "punchy"
+  },
+  "enhance_golden": {
+    "enable": false,
+    "level": "medium",
+    "core": [0, 0],
+    "ramp": 10
+  },
+  "preview_fps": 30
+}
