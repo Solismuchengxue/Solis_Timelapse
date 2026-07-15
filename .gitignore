@@ -11,6 +11,13 @@ __pycache__/
 .venv/
 *.log
 *.concat.txt
+config/local.yaml
+workspace/*
+!workspace/.gitkeep
+output/*
+!output/.gitkeep
+archive/*
+!archive/.gitkeep
 
 # Local media and processing data
 00_dist/*

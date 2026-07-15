@@ -1,0 +1,20 @@
+server:
+  host: 127.0.0.1
+  port: 9501
+  open_browser: true
+workspace_dir: workspace
+output_dir: output
+archive_dir: archive
+scan:
+  gap_seconds: 120
+preview:
+  fps: 30
+  width: 1920
+export:
+  fps: 30
+  resolution: 4k
+  codec: h264
+  crf: 18
+processing:
+  jpeg_quality: 95
+  default_recipe: natural
