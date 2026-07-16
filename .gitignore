@@ -1,10 +1,8 @@
 # Local agent context
 DEVLOG.md
-.agents/
-.claude/
+PLAYBOOK.md
 .codex/
-.worktrees/
-.superpowers/
+.agent/
 
 # Python/runtime files
 __pycache__/

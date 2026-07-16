@@ -9,17 +9,24 @@ import os
 import re
 import sys
 import threading
+import traceback
+import uuid
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
+import numpy as np
 from flask import Flask, jsonify, request, send_file, send_from_directory
+from PIL import Image
 from werkzeug.exceptions import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import archive, config_io, image_pipeline, media_catalog, video_export
+from src import archive, config_io, image_ops, image_pipeline, media_catalog, video_export
+from src.instance_guard import InstanceAlreadyRunning, InstanceGuard
 from src.project_store import ProjectStore
 from src.runtime_env import (
     RuntimeEnvironment,
@@ -39,6 +46,7 @@ WEBUI_DIR = Path(__file__).resolve().parent
 CURRENT_MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
 ARCHIVE_MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
 RUNTIME_ROOT_KEYS = ("workspace_dir", "output_dir", "archive_dir")
+BUILTIN_COLOR_PRESETS = {"natural", "clear", "punchy", "custom"}
 
 
 class ApiError(RuntimeError):
@@ -258,6 +266,7 @@ def _export_filename(segment: dict) -> str:
 def _task_response(task: dict) -> dict:
     """Return task data without task exception text or source paths."""
     safe = deepcopy(task)
+    safe.pop("history_logs", None)
     if safe.get("error"):
         safe["error"] = "任务失败，请查看任务日志。"
     detail = safe.get("detail")
@@ -293,6 +302,19 @@ def _recipe_for_pipeline(recipe: Any, settings: dict) -> dict:
     deflicker = source.get("deflicker", {}) if isinstance(source.get("deflicker", {}), dict) else {}
     golden = source.get("golden", {}) if isinstance(source.get("golden", {}), dict) else {}
     name = str(source.get("name", source.get("style", settings["processing"]["default_recipe"])))
+    processing = settings.get("processing", {})
+    presets = processing.get("color_presets", {})
+    fallback = config_io.DEFAULTS["processing"]["color_presets"]["natural"]
+    preset = presets.get(name, presets.get(processing.get("default_recipe"), fallback))
+    if not isinstance(preset, dict):
+        preset = fallback
+    try:
+        strength = max(0.0, min(1.5, float(source.get("strength", 100)) / 100))
+        saturation = 1 + (float(preset.get("sat", 1)) - 1) * strength
+        contrast = 1 + (float(preset.get("con", 1)) - 1) * strength
+        pivot = float(preset.get("pivot", 118))
+    except (TypeError, ValueError):
+        saturation, contrast, pivot = fallback["sat"], fallback["con"], fallback["pivot"]
     gain_limit = deflicker.get("gain_limit")
     pipeline_recipe = {
         "jpeg_quality": int(settings["processing"].get("jpeg_quality", 95)),
@@ -301,7 +323,7 @@ def _recipe_for_pipeline(recipe: Any, settings: dict) -> dict:
             "window": int(deflicker.get("window", 11)),
             "clip": deflicker.get("clip", (0.85, 1.2)),
         },
-        "grade": {"style": name},
+        "grade": {"style": "none", "sat": saturation, "con": contrast, "pivot": pivot},
         "enhance_golden": {
             "enable": bool(golden),
             "strength": float(golden.get("strength", 0)) / 100 if golden else 0,
@@ -312,6 +334,40 @@ def _recipe_for_pipeline(recipe: Any, settings: dict) -> dict:
         limit = abs(float(gain_limit))
         pipeline_recipe["deflicker"]["clip"] = (max(0.01, 1 - limit), 1 + limit)
     return pipeline_recipe
+
+
+def _validated_color_preset(value: Any) -> dict:
+    if not isinstance(value, dict):
+        raise ApiError("色彩配方必须是对象", "invalid_color_preset")
+    name = str(value.get("name", "")).strip()
+    if not name or len(name) > 80:
+        raise ApiError("色彩配方名称无效", "invalid_color_preset")
+    numbers = {}
+    for key, minimum, maximum in (("sat", 0.0, 4.0), ("con", 0.0, 4.0), ("pivot", 0.0, 255.0)):
+        try:
+            number = float(value.get(key))
+        except (TypeError, ValueError):
+            raise ApiError("色彩配方参数无效", "invalid_color_preset") from None
+        if not np.isfinite(number) or not minimum <= number <= maximum:
+            raise ApiError("色彩配方参数超出范围", "invalid_color_preset")
+        numbers[key] = number
+    return {"name": name, **numbers}
+
+
+def _color_preset_items(settings: dict) -> list[dict]:
+    values = settings.get("processing", {}).get("color_presets", {})
+    if not isinstance(values, dict):
+        values = {}
+    items = []
+    for preset_id, value in values.items():
+        if not isinstance(preset_id, str) or not isinstance(value, dict):
+            continue
+        try:
+            preset = _validated_color_preset(value)
+        except ApiError:
+            continue
+        items.append({"id": preset_id, **preset, "builtin": preset_id in BUILTIN_COLOR_PRESETS})
+    return items
 
 
 def _segment_by_id(project: dict, segment_id: str) -> dict:
@@ -363,7 +419,10 @@ def create_app(overrides: dict | None = None) -> Flask:
     output = effective_roots["output_dir"]
     archive_dir = effective_roots["archive_dir"]
     store = ProjectStore(workspace)
-    tasks = TaskManager(workspace / "task.json")
+    tasks = TaskManager(
+        workspace / "task.json",
+        log_level=settings.get("logging", {}).get("level", "INFO"),
+    )
 
     app = Flask(__name__, static_folder=None)
     app.config.update(TESTING=bool(runtime.get("TESTING", False)))
@@ -434,8 +493,8 @@ def create_app(overrides: dict | None = None) -> Flask:
 
         return store.update(update)
 
-    def validate_archive_complete(project: dict) -> None:
-        segments = project.get("segments", [])
+    def validate_archive_complete(project: dict, segment_ids: list[str]) -> None:
+        segments = [_segment_by_id(project, segment_id) for segment_id in segment_ids]
         if not segments:
             raise ApiError("当前项目尚未完成处理和导出", "archive_incomplete")
         artifact_paths: set[str] = set()
@@ -542,6 +601,11 @@ def create_app(overrides: dict | None = None) -> Flask:
         parent = Path(relative).parent.as_posix() if relative else ""
         if parent == ".":
             parent = ""
+        tasks.record(
+            f"浏览素材目录：{relative or '/'} · 子目录 {len(directories)} 个",
+            level="DEBUG",
+            kind="project",
+        )
         return jsonify({"path": relative, "parent": parent, "directories": directories})
 
     @app.post("/api/pick-directory")
@@ -564,7 +628,16 @@ def create_app(overrides: dict | None = None) -> Flask:
                     root.destroy()
             except Exception as exc:
                 raise ApiError("无法打开目录选择器", "picker_unavailable", 500) from exc
-        return jsonify({"path": str(Path(selected).resolve()) if selected else None})
+        selected_path = str(Path(selected).resolve()) if selected else None
+        body = request.get_json(silent=True) or {}
+        purpose = body.get("purpose", "source") if isinstance(body, dict) else "source"
+        tasks.record(
+            f"已选择目录：用途={purpose} · 路径={selected_path}"
+            if selected_path
+            else f"已取消目录选择：用途={purpose}",
+            kind="project",
+        )
+        return jsonify({"path": selected_path})
 
     @app.post("/api/project/scan")
     def api_scan_project():
@@ -572,32 +645,40 @@ def create_app(overrides: dict | None = None) -> Flask:
         source = _path_value(_body(), "source_dir")
         validate_source_dir(source)
         scan_settings = config_io.load_config(local_path=local_config_path)
+        gap_seconds = scan_settings["scan"].get("gap_seconds", 120)
 
         def work(context: TaskContext):
-            context.log("正在扫描素材")
-            frames = media_catalog.scan_source(source)
+            context.log(f"扫描开始：目录={source} · 自动分段间隔={gap_seconds} 秒")
+            frames = media_catalog.scan_source(
+                source,
+                progress=lambda done, total, path: context.progress(
+                    done, total, current_file=path.name
+                ),
+                cancelled=context.cancelled,
+            )
             context.raise_if_cancelled()
             if not frames:
                 raise ValueError("素材目录中没有支持的照片")
+            duration_seconds = media_catalog.capture_duration_seconds(frames)
+            duration_label = (
+                f"{duration_seconds:.1f} 秒" if duration_seconds is not None else "未知"
+            )
+            context.log(
+                f"素材读取完成：共 {len(frames)} 帧 · 拍摄时长 {duration_label}"
+            )
             project = store.create(source)
+            project["duration_seconds"] = duration_seconds
             segments = media_catalog.suggest_segments(frames, scan_settings["scan"])
             for segment in segments:
                 context.raise_if_cancelled()
                 segment["recipe"] = {"name": scan_settings["processing"]["default_recipe"]}
-                thumbnail_dir = workspace / "current" / "segments" / segment["id"] / "thumbnails"
-                for index, frame in enumerate(segment.get("frames", [])):
-                    context.raise_if_cancelled()
-                    source_path = Path(frame["path"])
-                    try:
-                        from PIL import Image
-
-                        thumbnail_dir.mkdir(parents=True, exist_ok=True)
-                        with Image.open(source_path) as image:
-                            image.thumbnail((320, 180))
-                            image.convert("RGB").save(thumbnail_dir / f"{index:06d}.jpg", quality=82)
-                    except (OSError, ValueError):
-                        # RAW support is provided by the processing pipeline; a missing UI thumbnail is non-fatal.
-                        continue
+            context.log(
+                "自动分段完成："
+                + "；".join(
+                    f"{segment.get('name', segment.get('id'))}={len(segment.get('source_files', []))} 帧"
+                    for segment in segments
+                )
+            )
             context.raise_if_cancelled()
             saved = store.save({**project, "status": "scanned", "segments": segments, "active_job_id": None})
             return {"segments": len(saved["segments"])}
@@ -609,7 +690,15 @@ def create_app(overrides: dict | None = None) -> Flask:
         require_idle()
         if _body().get("confirm") is not True:
             raise ApiError("必须确认清理当前工作区", "confirmation_required")
+        project = store.load() or {}
+        segment_count = len(project.get("segments", []))
+        source_dir = project.get("source_dir", "-")
         store.clear()
+        tasks.record(
+            f"已清除当前项目：素材目录={source_dir} · 分段={segment_count} 个 · "
+            "源照片、输出视频和归档未删除",
+            kind="project",
+        )
         return jsonify({"ok": True})
 
     @app.post("/api/segments/split")
@@ -625,20 +714,36 @@ def create_app(overrides: dict | None = None) -> Flask:
             "segments": media_catalog.split_segment(state.get("segments", []), segment_id, frame_index),
             "status": "edited",
         })
+        tasks.record(
+            f"已拆分分段：segment_id={segment_id} · 拆分帧索引={frame_index} · "
+            f"当前共 {len(project.get('segments', []))} 个分段",
+            kind="segment",
+        )
         return jsonify({"project": project})
 
     @app.post("/api/segments/merge")
     def api_merge_segments():
         require_idle()
         body = _body()
-        left_id, right_id = body.get("left_id"), body.get("right_id")
-        if not isinstance(left_id, str) or not isinstance(right_id, str):
-            raise ApiError("left_id 和 right_id 必须有效", "invalid_segment")
+        segment_ids = body.get("segment_ids")
+        if segment_ids is None:
+            segment_ids = [body.get("left_id"), body.get("right_id")]
+        if (
+            not isinstance(segment_ids, list)
+            or len(segment_ids) < 2
+            or not all(isinstance(item, str) for item in segment_ids)
+        ):
+            raise ApiError("segment_ids 必须包含至少两个分段", "invalid_segment")
         project = store.update(lambda state: {
             **state,
-            "segments": media_catalog.merge_segments(state.get("segments", []), left_id, right_id),
+            "segments": media_catalog.merge_segments(state.get("segments", []), segment_ids),
             "status": "edited",
         })
+        tasks.record(
+            f"已合并分段：数量={len(segment_ids)} · IDs={','.join(segment_ids)} · "
+            f"当前共 {len(project.get('segments', []))} 个分段",
+            kind="segment",
+        )
         return jsonify({"project": project})
 
     @app.post("/api/segments/reorder")
@@ -652,6 +757,10 @@ def create_app(overrides: dict | None = None) -> Flask:
             "segments": media_catalog.reorder_segments(state.get("segments", []), ordered_ids),
             "status": "edited",
         })
+        tasks.record(
+            f"已调整分段顺序：{len(ordered_ids)} 个分段",
+            kind="segment",
+        )
         return jsonify({"project": project})
 
     @app.patch("/api/segments/<segment_id>")
@@ -676,6 +785,10 @@ def create_app(overrides: dict | None = None) -> Flask:
         if rejection_values is not None:
             values["rejected_frames"] = _frame_rejections(segment, rejection_values)
         updated = save_project_segment(segment_id, values)
+        tasks.record(
+            f"已更新分段：{segment.get('name', segment_id)} · 字段={','.join(values)}",
+            kind="segment",
+        )
         return jsonify({"project": updated, "segment": _segment_by_id(updated, segment_id)})
 
     @app.get("/api/segments/<segment_id>/thumbnails")
@@ -689,10 +802,30 @@ def create_app(overrides: dict | None = None) -> Flask:
             raise ApiError("offset 和 limit 必须是整数", "invalid_paging") from exc
         if offset < 0 or limit < 1:
             raise ApiError("offset 和 limit 超出范围", "invalid_paging")
+        frames = segment.get("frames", [])
+        requested = list(enumerate(frames))[offset : offset + limit]
+        thumbnail_dir = workspace / "current" / "segments" / segment_id / "thumbnails"
+
+        def ensure_thumbnail(item: tuple[int, dict]) -> None:
+            index, frame = item
+            target = thumbnail_dir / f"{index:06d}.jpg"
+            if target.is_file():
+                return
+            source_path = frame.get("path") if isinstance(frame, dict) else None
+            if not source_path:
+                return
+            try:
+                image_pipeline.write_thumbnail(Path(source_path), target)
+            except (OSError, RuntimeError, ValueError):
+                return
+
+        if requested:
+            workers = min(4, len(requested))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="thumbnail") as executor:
+                list(executor.map(ensure_thumbnail, requested))
+
         thumbnails = []
-        for index, frame in enumerate(segment.get("frames", [])):
-            if index < offset or len(thumbnails) >= limit:
-                continue
+        for index, frame in requested:
             metadata = {key: value for key, value in frame.items() if key != "path"}
             thumbnail = workspace / "current" / "segments" / segment_id / "thumbnails" / f"{index:06d}.jpg"
             metadata.update({
@@ -700,7 +833,68 @@ def create_app(overrides: dict | None = None) -> Flask:
                 "url": f"/media/current/segments/{segment_id}/thumbnails/{index:06d}.jpg" if thumbnail.is_file() else "",
             })
             thumbnails.append(metadata)
-        return jsonify({"thumbnails": thumbnails, "total": len(segment.get("frames", []))})
+        return jsonify({"thumbnails": thumbnails, "total": len(frames)})
+
+    @app.get("/api/segments/<segment_id>/frames/<int:frame_index>/image")
+    def api_frame_image(segment_id: str, frame_index: int):
+        project = project_or_error()
+        segment = _segment_by_id(project, segment_id)
+        frames = segment.get("frames", [])
+        if frame_index < 0 or frame_index >= len(frames):
+            raise ApiError("帧不存在", "not_found", 404)
+        frame = frames[frame_index]
+        source_value = frame.get("path") if isinstance(frame, dict) else frame
+        if not isinstance(source_value, str):
+            raise ApiError("帧不存在", "not_found", 404)
+        try:
+            source_root = Path(project["source_dir"]).resolve(strict=True)
+            source_path = Path(source_value).resolve(strict=True)
+            source_path.relative_to(source_root)
+        except (KeyError, OSError, ValueError):
+            raise ApiError("帧不存在", "not_found", 404) from None
+        registered = {
+            str(Path(item.get("path") if isinstance(item, dict) else item).resolve()).casefold()
+            for item in frames
+            if isinstance(item, (dict, str))
+            and isinstance(item.get("path") if isinstance(item, dict) else item, str)
+        }
+        if str(source_path).casefold() not in registered or not source_path.is_file():
+            raise ApiError("帧不存在", "not_found", 404)
+        if source_path.suffix.casefold() in {".jpg", ".jpeg", ".png", ".webp"}:
+            return send_file(source_path, conditional=True)
+
+        try:
+            pixels = image_ops.load_image(source_path)
+            encoded = BytesIO()
+            Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8)).save(
+                encoded, format="JPEG", quality=92
+            )
+            encoded.seek(0)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ApiError("原图无法解码", "media_unavailable", 422) from exc
+        return send_file(
+            encoded,
+            mimetype="image/jpeg",
+            download_name=f"{source_path.stem}.jpg",
+            conditional=True,
+        )
+
+    @app.get("/api/segments/<segment_id>/video")
+    def api_segment_video(segment_id: str):
+        project = project_or_error()
+        segment = _segment_by_id(project, segment_id)
+        artifact = segment.get("export_artifact")
+        artifact_value = artifact.get("path") if isinstance(artifact, dict) else None
+        if not isinstance(artifact_value, str):
+            raise ApiError("成片不存在", "not_found", 404)
+        try:
+            artifact_path = Path(artifact_value).resolve(strict=True)
+            artifact_path.relative_to(output.resolve())
+        except (OSError, ValueError):
+            raise ApiError("成片不存在", "not_found", 404) from None
+        if artifact_path.suffix.casefold() != ".mp4" or not artifact_path.is_file():
+            raise ApiError("成片不存在", "not_found", 404)
+        return send_file(artifact_path, mimetype="video/mp4", conditional=True)
 
     @app.get("/api/segments/<segment_id>/chart")
     def api_chart(segment_id: str):
@@ -728,11 +922,24 @@ def create_app(overrides: dict | None = None) -> Flask:
         multiplier = 2 if from_stage == "analyze" else 1
         total = sum(len(segment.get("source_files", [])) * multiplier for segment in selected)
         completed = 0
+        context.log(
+            f"处理任务开始：分段={len(selected)} 个 · 起始阶段={from_stage} · "
+            f"总进度单位={total}"
+        )
         for segment in selected:
             context.raise_if_cancelled()
             segment_id = segment["id"]
             work_dir = workspace / "current" / "segments" / segment_id
             recipe = _recipe_for_pipeline(segment.get("recipe"), settings_for_task)
+            segment_name = segment.get("name", segment_id)
+            frame_total = len(segment.get("source_files", []))
+            context.log(
+                f"准备处理 {segment_name}：{frame_total} 帧 · "
+                f"配方={segment.get('recipe', {}).get('name', 'natural') if isinstance(segment.get('recipe'), dict) else segment.get('recipe')}"
+            )
+            context.debug(
+                "处理参数：" + json.dumps(recipe, ensure_ascii=False, sort_keys=True)
+            )
 
             def progress(done: int, _segment_total: int, **detail: Any) -> None:
                 frame = detail.get("frame") or detail.get("file")
@@ -744,9 +951,13 @@ def create_app(overrides: dict | None = None) -> Flask:
                 )
 
             if from_stage == "analyze":
-                context.log(f"正在分析 {segment.get('name', segment_id)}")
+                context.log(f"正在分析 {segment_name}")
                 analysis = image_pipeline.analyze_segment(segment, recipe, work_dir, progress, context.cancelled)
                 save_project_segment(segment_id, {"analysis": analysis, "render_status": "analyzed"})
+                context.log(
+                    f"分析完成 {segment_name}：{analysis.get('frame_count', frame_total)} 帧 · "
+                    f"异常候选={len(analysis.get('anomaly_candidates', []))}"
+                )
                 completed += len(segment.get("source_files", []))
             else:
                 analysis = segment.get("analysis")
@@ -757,7 +968,7 @@ def create_app(overrides: dict | None = None) -> Flask:
                     analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
 
             context.raise_if_cancelled()
-            context.log(f"正在渲染 {segment.get('name', segment_id)}")
+            context.log(f"正在渲染 {segment_name}：输出目录={work_dir / 'result'}")
             result = image_pipeline.render_segment(segment, recipe, analysis, work_dir, progress, context.cancelled)
             save_project_segment(segment_id, {
                 "analysis": analysis,
@@ -766,8 +977,13 @@ def create_app(overrides: dict | None = None) -> Flask:
                 "representative_url": f"/media/current/segments/{segment_id}/thumbnails/000000.jpg",
                 "export_artifact": None,
             })
+            context.log(
+                f"渲染完成 {segment_name}：输出={result.frame_count} 帧 · "
+                f"跳过坏帧={result.rejected_count} 帧"
+            )
             completed += len(segment.get("source_files", []))
         store.update(lambda state: {**state, "status": "processed", "active_job_id": None})
+        context.log(f"处理任务完成：成功处理 {len(selected)} 个分段")
         return {"segments": len(selected)}
 
     def start_process(from_stage: str):
@@ -779,6 +995,10 @@ def create_app(overrides: dict | None = None) -> Flask:
             raise ApiError("处理参数无效", "invalid_process")
         for segment_id in ids:
             _segment_by_id(project, segment_id)
+        tasks.record(
+            f"已请求渲染：起始阶段={from_stage} · 分段数量={len(ids)} · IDs={','.join(ids)}",
+            kind="process",
+        )
         return submit("render" if from_stage == "render" else "analyze", lambda context: run_process(project, ids, from_stage, context))
 
     @app.post("/api/process")
@@ -801,12 +1021,22 @@ def create_app(overrides: dict | None = None) -> Flask:
     def api_current_task():
         return jsonify({"task": _task_response(tasks.snapshot())})
 
+    @app.get("/api/logs")
+    def api_logs():
+        return jsonify({"logs": tasks.history()})
+
+    @app.delete("/api/logs")
+    def api_clear_logs():
+        require_idle()
+        tasks.clear_logs()
+        return jsonify({"ok": True})
+
     @app.post("/api/export")
     def api_export():
         require_idle()
         body = _body()
         project = project_or_error()
-        ids = body.get("segment_ids") or [segment.get("id") for segment in project.get("segments", [])]
+        ids = body.get("segment_ids")
         if not isinstance(ids, list) or not ids or not all(isinstance(item, str) for item in ids):
             raise ApiError("segment_ids 必须是非空数组", "invalid_export")
         selected = [_segment_by_id(project, segment_id) for segment_id in ids]
@@ -821,13 +1051,20 @@ def create_app(overrides: dict | None = None) -> Flask:
 
         def work(context: TaskContext):
             outputs = []
+            context.log(
+                f"导出任务开始：分段={len(selected)} 个 · fps={options['fps']} · "
+                f"分辨率={options['resolution']} · 编码={options['codec']} · CRF={options['crf']}"
+            )
             for index, segment in enumerate(selected, start=1):
                 context.raise_if_cancelled()
                 result_dir = workspace / "current" / "segments" / segment["id"] / "result"
                 identity = _result_identity(result_dir)
                 output.mkdir(parents=True, exist_ok=True)
                 target = output / _export_filename(segment)
-                context.log(f"正在导出 {segment.get('name', segment['id'])}")
+                context.log(
+                    f"正在导出 {segment.get('name', segment['id'])}："
+                    f"输入={identity['frame_count']} 帧 · 输出={target}"
+                )
                 result = video_export.export_video(
                     result_dir,
                     target,
@@ -848,7 +1085,12 @@ def create_app(overrides: dict | None = None) -> Flask:
                     }
                 })
                 outputs.append(artifact_path.name)
-            return {"outputs": outputs}
+                context.log(
+                    f"导出完成 {segment.get('name', segment['id'])}："
+                    f"文件={artifact_path.name} · 大小={artifact_path.stat().st_size} 字节"
+                )
+            context.log(f"导出任务完成：生成 {len(outputs)} 个 MP4 · 目录={output}")
+            return {"outputs": outputs, "output_dir": str(output)}
 
         return submit("export", work)
 
@@ -856,16 +1098,34 @@ def create_app(overrides: dict | None = None) -> Flask:
     def api_archive():
         require_idle()
         body = _body()
-        if body.get("confirm_workspace_clear") is not True or body.get("preserve_source") is not True:
-            raise ApiError("必须确认清理工作区且保留源照片", "confirmation_required")
+        if body.get("confirm_archive") is not True or body.get("preserve_source") is not True:
+            raise ApiError("必须确认归档且保留源照片", "confirmation_required")
         project = project_or_error()
-        validate_archive_complete(project)
+        ids = body.get("segment_ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(item, str) for item in ids):
+            raise ApiError("segment_ids 必须是非空数组", "invalid_segment")
+        ids = list(dict.fromkeys(ids))
+        validate_archive_complete(project, ids)
 
         def work(context: TaskContext):
-            context.log("正在验证并归档项目")
+            context.log(
+                f"归档任务开始：正在验证 {len(ids)} 个分段 · 归档根目录={archive_dir}"
+            )
             context.raise_if_cancelled()
-            destination = archive.archive_project(project, workspace / "current", output, archive_dir)
-            return {"timestamp": destination.name}
+            destination = archive.archive_project(
+                project,
+                workspace / "current",
+                output,
+                archive_dir,
+                segment_ids=ids,
+                clear_workspace=False,
+            )
+            context.log(f"归档完成：目录={destination} · 分段={len(ids)} 个")
+            return {
+                "timestamp": destination.name,
+                "archive_dir": str(destination),
+                "segment_ids": ids,
+            }
 
         return submit("archive", work, cancellable_while_running=False)
 
@@ -936,6 +1196,10 @@ def create_app(overrides: dict | None = None) -> Flask:
 
     def save_settings(values: dict) -> dict:
         candidate = config_io.deep_merge(settings_payload(), values)
+        log_level = str(candidate.get("logging", {}).get("level", "INFO")).upper()
+        if log_level not in {"INFO", "DEBUG"}:
+            raise ApiError("日志级别必须是 INFO 或 DEBUG", "invalid_log_level")
+        candidate.setdefault("logging", {})["level"] = log_level
         try:
             candidate_roots = _configured_roots(candidate)
             _validate_runtime_roots(candidate_roots)
@@ -948,6 +1212,11 @@ def create_app(overrides: dict | None = None) -> Flask:
             except (OSError, ApiError) as exc:
                 raise ApiError("工作、输出和归档目录配置不安全", "invalid_runtime_roots") from exc
         config_io.save_local_config(candidate, local_config_path)
+        tasks.set_log_level(log_level)
+        tasks.record(
+            f"设置已保存：日志级别={log_level} · 配置文件={local_config_path}",
+            kind="settings",
+        )
         return candidate
 
     @app.get("/api/settings")
@@ -959,6 +1228,72 @@ def create_app(overrides: dict | None = None) -> Flask:
     def api_save_settings():
         saved = save_settings(_body())
         return jsonify(settings_response(saved))
+
+    def save_color_presets(presets: dict) -> dict:
+        values = settings_payload()
+        values.setdefault("processing", {})["color_presets"] = presets
+        config_io.save_local_config(values, local_config_path)
+        return values
+
+    @app.get("/api/color-presets")
+    def api_color_presets():
+        settings = settings_payload()
+        return jsonify({
+            "presets": _color_preset_items(settings),
+            "default": settings.get("processing", {}).get("default_recipe", "natural"),
+        })
+
+    @app.post("/api/color-presets")
+    def api_create_color_preset():
+        preset = _validated_color_preset(_body())
+        settings = settings_payload()
+        presets = deepcopy(settings.get("processing", {}).get("color_presets", {}))
+        preset_id = f"preset_{uuid.uuid4().hex[:10]}"
+        presets[preset_id] = preset
+        save_color_presets(presets)
+        tasks.record(
+            f"已创建色彩配方：{preset['name']} · id={preset_id}",
+            kind="settings",
+        )
+        return jsonify({"preset": {"id": preset_id, **preset, "builtin": False}}), 201
+
+    @app.put("/api/color-presets/<preset_id>")
+    def api_update_color_preset(preset_id: str):
+        settings = settings_payload()
+        presets = deepcopy(settings.get("processing", {}).get("color_presets", {}))
+        if preset_id not in presets:
+            raise ApiError("色彩配方不存在", "preset_not_found", 404)
+        preset = _validated_color_preset(_body())
+        presets[preset_id] = preset
+        save_color_presets(presets)
+        tasks.record(
+            f"已保存色彩配方：{preset['name']} · id={preset_id}",
+            kind="settings",
+        )
+        return jsonify({
+            "preset": {"id": preset_id, **preset, "builtin": preset_id in BUILTIN_COLOR_PRESETS}
+        })
+
+    @app.delete("/api/color-presets/<preset_id>")
+    def api_delete_color_preset(preset_id: str):
+        if preset_id in BUILTIN_COLOR_PRESETS:
+            raise ApiError("内置色彩配方不能删除", "preset_builtin", 409)
+        settings = settings_payload()
+        presets = deepcopy(settings.get("processing", {}).get("color_presets", {}))
+        if preset_id not in presets:
+            raise ApiError("色彩配方不存在", "preset_not_found", 404)
+        project = store.load() or {}
+        in_use = settings.get("processing", {}).get("default_recipe") == preset_id
+        for segment in project.get("segments", []):
+            recipe = segment.get("recipe", {})
+            name = recipe if isinstance(recipe, str) else recipe.get("name") if isinstance(recipe, dict) else None
+            in_use = in_use or name == preset_id
+        if in_use:
+            raise ApiError("色彩配方正在使用，不能删除", "preset_in_use", 409)
+        del presets[preset_id]
+        save_color_presets(presets)
+        tasks.record(f"已删除色彩配方：id={preset_id}", kind="settings")
+        return jsonify({"ok": True})
 
     @app.get("/api/config")
     def api_get_config():
@@ -987,6 +1322,11 @@ def create_app(overrides: dict | None = None) -> Flask:
 
     @app.errorhandler(ApiError)
     def api_error(error: ApiError):
+        tasks.record(
+            f"操作失败：{request.method} {request.path} · {error.code} · {error}",
+            level="WARNING",
+            kind="api",
+        )
         return _error(str(error), error.code, error.status)
 
     @app.errorhandler(TaskBusy)
@@ -1001,6 +1341,12 @@ def create_app(overrides: dict | None = None) -> Flask:
             return "", error.code or 404
         if request.path.startswith("/api/"):
             logging.getLogger(__name__).exception("Unhandled WebUI API error", exc_info=error)
+            tasks.record(
+                f"接口异常：{request.method} {request.path} · {error.__class__.__name__}: {error}",
+                level="ERROR",
+                kind="api",
+            )
+            tasks.record(traceback.format_exc().rstrip(), level="DEBUG", kind="api")
             return _error("服务器处理请求时失败", "internal_error", 500)
         raise error
 
@@ -1008,11 +1354,27 @@ def create_app(overrides: dict | None = None) -> Flask:
 
 
 def _print_banner(host: str, port: int) -> None:
+    lan = (
+        f"http://本机局域网IP:{port}/（已监听局域网）"
+        if host in {"0.0.0.0", "::"}
+        else "（默认只监听本机；加 --host 0.0.0.0 才对外开放）"
+    )
     print(
-        f"\nSolis_Timelapse WebUI is running\n"
-        f"Local URL: http://127.0.0.1:{port}/\n"
-        f"Binding: {host}:{port}\n"
-        "Close this window or press Ctrl+C to stop the server.\n",
+        "\n"
+        "════════════════════════════════════════════════════════\n"
+        "  Solis_Timelapse · WebUI 已启动\n"
+        "════════════════════════════════════════════════════════\n"
+        f"  本机访问 : http://127.0.0.1:{port}/\n"
+        f"  局域网   : {lan}\n"
+        f"  绑定     : {host}:{port}\n\n"
+        "  用法：\n"
+        "    · 浏览器会自动打开；没弹出就手动打开上面的本机地址。\n"
+        "    · 工作台：选择照片目录 → 扫描 → 检查分段和帧 → 处理 → 导出。\n"
+        "    · 处理历史与日志：查看归档成果和任务记录；本窗口会同步输出日志。\n"
+        "    · 色彩配方：查看、编辑、保存和删除实际参与渲染的调色预设。\n"
+        "    · 设置：调整工作目录、自动分段、预览和导出参数。\n\n"
+        "  这个窗口是服务日志，别关；关掉它 = 停止 WebUI。   停止：Ctrl+C\n"
+        "════════════════════════════════════════════════════════\n",
         flush=True,
     )
 
@@ -1025,11 +1387,30 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
 
-    _print_banner(args.host, args.port)
-    if defaults.get("open_browser", True) and not args.no_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{args.port}/")).start()
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)
-    create_app().run(host=args.host, port=args.port, debug=False)
+    runtime_environment = load_runtime_environment(os.environ, config_io.ROOT)
+    settings = config_io.load_config(local_path=runtime_environment.local_config_path)
+    workspace_value = (
+        runtime_environment.workspace_dir
+        if runtime_environment.mode == "container"
+        else settings["workspace_dir"]
+    )
+    guard = InstanceGuard(_configured_root(workspace_value) / ".solis-instance")
+    try:
+        with guard:
+            app = create_app()
+            _print_banner(args.host, args.port)
+            if defaults.get("open_browser", True) and not args.no_browser:
+                threading.Timer(
+                    1.0, lambda: webbrowser.open(f"http://127.0.0.1:{args.port}/")
+                ).start()
+            logging.getLogger("werkzeug").setLevel(logging.WARNING)
+            app.run(host=args.host, port=args.port, debug=False)
+    except InstanceAlreadyRunning:
+        print(
+            "\n  Solis_Timelapse 已在使用当前工作目录运行。\n"
+            "  请使用已经打开的 WebUI；如需重启，请先关闭原来的命令行窗口。\n",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

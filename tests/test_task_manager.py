@@ -158,6 +158,51 @@ class TaskManagerTests(unittest.TestCase):
         self.manager.submit("render", fail)
         failed = self.wait_for("failed")
         self.assertEqual(failed["error"], "broken frame")
+        self.assertIn(
+            "任务失败：broken frame",
+            [entry["message"] for entry in self.manager.history()],
+        )
+
+    def test_info_level_omits_debug_progress_details(self):
+        self.manager.submit(
+            "scan",
+            lambda context: context.progress(1, 2, current_file="frame-1.jpg"),
+        )
+        self.wait_for("completed")
+
+        self.assertNotIn(
+            "进度 1/2 · current_file=frame-1.jpg",
+            [entry["message"] for entry in self.manager.history()],
+        )
+
+    def test_debug_level_records_progress_and_traceback(self):
+        self.manager.set_log_level("DEBUG")
+
+        def fail(context):
+            context.progress(1, 2, current_file="frame-1.jpg")
+            raise ValueError("broken frame")
+
+        self.manager.submit("render", fail)
+        self.wait_for("failed")
+        history = self.manager.history()
+
+        self.assertIn(
+            "进度 1/2 · current_file=frame-1.jpg",
+            [entry["message"] for entry in history],
+        )
+        self.assertTrue(any(entry["level"] == "DEBUG" for entry in history))
+        self.assertTrue(
+            any("Traceback (most recent call last)" in entry["message"] for entry in history)
+        )
+
+    def test_record_adds_detailed_non_task_event(self):
+        self.manager.record("已选择素材目录：photos", kind="project")
+
+        event = self.manager.history()[-1]
+        self.assertEqual(event["level"], "INFO")
+        self.assertEqual(event["kind"], "project")
+        self.assertIsNone(event["job_id"])
+        self.assertEqual(event["message"], "已选择素材目录：photos")
 
     def test_logs_are_bounded(self):
         def work(context):
@@ -167,6 +212,41 @@ class TaskManagerTests(unittest.TestCase):
         self.manager.submit("scan", work)
         completed = self.wait_for("completed")
         self.assertEqual(completed["logs"], ["line 2", "line 3", "line 4"])
+
+    def test_history_logs_survive_next_task_and_can_be_cleared(self):
+        self.manager.submit("first", lambda context: context.log("first message"))
+        self.wait_for("completed")
+        self.manager.submit("second", lambda context: context.log("second message"))
+        self.wait_for("completed")
+
+        messages = [entry["message"] for entry in self.manager.history()]
+        self.assertIn("first message", messages)
+        self.assertIn("second message", messages)
+
+        self.manager.clear_logs()
+
+        self.assertEqual(self.manager.history(), [])
+        self.assertEqual(self.manager.snapshot()["logs"], [])
+
+    def test_transient_permission_error_during_persist_is_retried(self):
+        real_replace = __import__("os").replace
+        attempts = []
+
+        def flaky_replace(source, target):
+            attempts.append((source, target))
+            if len(attempts) == 1:
+                raise PermissionError(5, "file is temporarily locked")
+            return real_replace(source, target)
+
+        with (
+            patch("src.task_manager.os.replace", side_effect=flaky_replace),
+            patch("src.task_manager.time.sleep") as sleep,
+        ):
+            self.manager.clear_logs()
+
+        self.assertEqual(len(attempts), 2)
+        sleep.assert_called_once()
+        self.assertTrue(self.state_path.is_file())
 
     def test_persisted_running_task_becomes_interrupted_on_startup(self):
         self.manager.shutdown()

@@ -125,6 +125,8 @@ def archive_project(
     output_dir: Path,
     archive_dir: Path,
     timestamp: str | None = None,
+    segment_ids: list[str] | None = None,
+    clear_workspace: bool = True,
 ) -> Path:
     workspace = Path(workspace).resolve()
     output_dir = Path(output_dir).resolve()
@@ -146,16 +148,31 @@ def archive_project(
     preview_paths: list[str] = []
     output_paths: list[str] = []
 
+    all_segments = project.get("segments", [])
+    if segment_ids is None:
+        selected_segments = all_segments
+    else:
+        requested = list(dict.fromkeys(segment_ids))
+        known = {str(segment.get("id")): segment for segment in all_segments}
+        if not requested or any(segment_id not in known for segment_id in requested):
+            raise ValueError("segment_ids must reference existing segments")
+        requested_set = set(requested)
+        selected_segments = [
+            segment for segment in all_segments
+            if str(segment.get("id")) in requested_set
+        ]
+    archived_project = {**project, "segments": selected_segments}
+
     try:
         temporary.mkdir(parents=True)
         project_file = workspace / "project.json"
-        if project_file.is_file():
+        if segment_ids is None and project_file.is_file():
             _copy(project_file, temporary / "project.json", verification)
         else:
-            _write_json(temporary / "project.json", project)
+            _write_json(temporary / "project.json", archived_project)
 
         used_names: set[str] = set()
-        for index, segment in enumerate(project.get("segments", []), start=1):
+        for index, segment in enumerate(selected_segments, start=1):
             segment_id = _safe_component(segment.get("id"), f"segment-{index}")
             base_name = _safe_component(segment.get("name"), f"segment-{index}")
             segment_name = base_name
@@ -212,7 +229,7 @@ def archive_project(
             )
 
         previews_dir = workspace / "previews"
-        if previews_dir.is_dir():
+        if segment_ids is None and previews_dir.is_dir():
             for preview in sorted(previews_dir.rglob("*.mp4")):
                 name = sanitize_windows_filename(preview.name)
                 target = temporary / name
@@ -223,8 +240,27 @@ def archive_project(
                 _copy(preview, target, verification)
                 preview_paths.append(target.name)
 
-        if output_dir.is_dir():
+        if segment_ids is None and output_dir.is_dir():
             for output_file in sorted(path for path in output_dir.rglob("*") if path.is_file()):
+                relative = output_file.relative_to(output_dir)
+                target = temporary / "output" / relative
+                _copy(output_file, target, verification)
+                output_paths.append((Path("output") / relative).as_posix())
+        elif segment_ids is not None:
+            seen_outputs: set[Path] = set()
+            for segment in selected_segments:
+                artifact = segment.get("export_artifact")
+                artifact_value = artifact.get("path") if isinstance(artifact, dict) else None
+                if not isinstance(artifact_value, str):
+                    continue
+                output_file = Path(artifact_value).resolve()
+                if (
+                    output_file in seen_outputs
+                    or not output_file.is_file()
+                    or not _is_within(output_file, output_dir)
+                ):
+                    continue
+                seen_outputs.add(output_file)
                 relative = output_file.relative_to(output_dir)
                 target = temporary / "output" / relative
                 _copy(output_file, target, verification)
@@ -238,7 +274,7 @@ def archive_project(
             "schema_version": 1,
             "archived_at": _now(),
             "source_dir": project.get("source_dir"),
-            "source_file_count": _source_file_count(project),
+            "source_file_count": _source_file_count(archived_project),
             "segment_count": len(segment_manifest),
             "segments": segment_manifest,
             "recipes": [item["recipe"] for item in segment_manifest],
@@ -251,11 +287,12 @@ def archive_project(
         _write_json(temporary / "manifest.json", manifest)
         os.replace(temporary, destination)
 
-        for child in list(workspace.iterdir()):
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
+        if clear_workspace:
+            for child in list(workspace.iterdir()):
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
         return destination
     except Exception:
         if temporary.exists():

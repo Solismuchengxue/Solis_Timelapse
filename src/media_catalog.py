@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import exifread
@@ -99,6 +101,44 @@ def _dimensions(path: Path, tags: dict[str, Any]) -> tuple[int, int]:
 def _jpeg_capture_tag(path: Path) -> Any | None:
     if path.suffix.casefold() not in {".jpg", ".jpeg"}:
         return None
+
+
+def _jpeg_exif_value(exif: Any, tag_id: int) -> Any | None:
+    value = exif.get(tag_id)
+    if value is not None:
+        return value
+    try:
+        return exif.get_ifd(34665).get(tag_id)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def _read_jpeg_frame(path: Path) -> FrameInfo:
+    with Image.open(path) as image:
+        width, height = image.size
+        exif = image.getexif()
+        capture_tag = (
+            _jpeg_exif_value(exif, 36867)
+            or _jpeg_exif_value(exif, 36868)
+            or _jpeg_exif_value(exif, 306)
+        )
+        return FrameInfo(
+            path=str(path.resolve()),
+            name=path.name,
+            captured_at=_captured_at(capture_tag, path),
+            width=width,
+            height=height,
+            shutter=_number(_jpeg_exif_value(exif, 33434)),
+            aperture=_number(_jpeg_exif_value(exif, 33437)),
+            iso=_integer(_jpeg_exif_value(exif, 34855)),
+            exposure_bias=_number(_jpeg_exif_value(exif, 37380)),
+            exposure_mode=_text(
+                _jpeg_exif_value(exif, 41986) or _jpeg_exif_value(exif, 34850)
+            ),
+            metering_mode=_text(_jpeg_exif_value(exif, 37383)),
+            focal_length=_number(_jpeg_exif_value(exif, 37386)),
+            white_balance=_text(_jpeg_exif_value(exif, 41987)),
+        )
     try:
         with Image.open(path) as image:
             exif = image.getexif()
@@ -108,6 +148,8 @@ def _jpeg_capture_tag(path: Path) -> Any | None:
 
 
 def _read_frame(path: Path) -> FrameInfo:
+    if path.suffix.casefold() in {".jpg", ".jpeg"}:
+        return _read_jpeg_frame(path)
     with path.open("rb") as handle:
         tags = exifread.process_file(handle, details=False, strict=False)
     width, height = _dimensions(path, tags)
@@ -131,16 +173,37 @@ def _read_frame(path: Path) -> FrameInfo:
     )
 
 
-def scan_source(source_dir: Path) -> list[FrameInfo]:
+def scan_source(
+    source_dir: Path,
+    *,
+    max_workers: int | None = None,
+    progress: Callable[[int, int, Path], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[FrameInfo]:
     source = Path(source_dir).resolve()
     if not source.is_dir():
         raise FileNotFoundError(f"Source directory does not exist: {source}")
-    paths = [
+    paths = sorted(
+        [
         path
         for path in source.rglob("*")
         if path.is_file() and path.suffix.casefold() in SUPPORTED_EXTENSIONS
-    ]
-    frames = [_read_frame(path) for path in paths]
+        ],
+        key=lambda path: (path.name.casefold(), path.name, str(path).casefold()),
+    )
+    if not paths:
+        return []
+    workers = max_workers or min(8, max(2, (os.cpu_count() or 2)))
+    workers = max(1, min(int(workers), len(paths), 16))
+    frames = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="media-scan") as executor:
+        for index, frame in enumerate(executor.map(_read_frame, paths), start=1):
+            if cancelled and cancelled():
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise RuntimeError("scan cancelled")
+            frames.append(frame)
+            if progress:
+                progress(index, len(paths), Path(frame.path))
     return sorted(
         frames,
         key=lambda item: (
@@ -159,6 +222,17 @@ def _parse_time(value: str | None) -> datetime | None:
     try:
         return datetime.fromisoformat(value)
     except ValueError:
+        return None
+
+
+def capture_duration_seconds(frames: list[FrameInfo]) -> float | None:
+    times = [_parse_time(frame.captured_at) for frame in frames]
+    valid = [value for value in times if value is not None]
+    if len(valid) < 2:
+        return 0.0 if valid else None
+    try:
+        return max(0.0, (valid[-1] - valid[0]).total_seconds())
+    except TypeError:
         return None
 
 
@@ -209,8 +283,34 @@ def _should_split(left: FrameInfo, right: FrameInfo, settings: dict) -> bool:
     )
 
 
+def _format_time_range(start: str | None, end: str | None) -> str | None:
+    left = _parse_time(start)
+    right = _parse_time(end)
+    if left is None or right is None:
+        return None
+    if left.date() == right.date():
+        return f"{left:%Y-%m-%d %H:%M:%S}–{right:%H:%M:%S}"
+    return f"{left:%Y-%m-%d %H:%M:%S}–{right:%Y-%m-%d %H:%M:%S}"
+
+
+def _refresh_segment_metadata(segment: dict) -> None:
+    frames = segment.get("frames", [])
+    focals = [float(item["focal_length"]) for item in frames if item.get("focal_length") is not None]
+    if focals:
+        low, high = min(focals), max(focals)
+        segment["focal_length"] = round(sum(focals) / len(focals), 2) if high - low <= 0.5 else f"{low:g}–{high:g}"
+    else:
+        segment["focal_length"] = None
+    captured = [item.get("captured_at") for item in frames if item.get("captured_at")]
+    segment["captured_start"] = captured[0] if captured else None
+    segment["captured_end"] = captured[-1] if captured else None
+    segment["time_range"] = _format_time_range(
+        segment["captured_start"], segment["captured_end"]
+    )
+
+
 def _new_segment(frames: list[FrameInfo], number: int, start_index: int) -> dict:
-    return {
+    segment = {
         "id": str(uuid4()),
         "name": f"Segment {number:02d}",
         "source_files": [frame.path for frame in frames],
@@ -225,6 +325,8 @@ def _new_segment(frames: list[FrameInfo], number: int, start_index: int) -> dict
         "render_status": "pending",
         "output_files": [],
     }
+    _refresh_segment_metadata(segment)
+    return segment
 
 
 def suggest_segments(frames: list[FrameInfo], settings: dict) -> list[dict]:
@@ -250,6 +352,9 @@ def _reset_processing(segment: dict) -> None:
     segment["analysis"] = None
     segment["render_status"] = "pending"
     segment["output_files"] = []
+    segment.pop("representative_url", None)
+    segment.pop("representative_name", None)
+    segment.pop("export_artifact", None)
 
 
 def split_segment(segments: list[dict], segment_id: str, frame_index: int) -> list[dict]:
@@ -282,31 +387,41 @@ def split_segment(segments: list[dict], segment_id: str, frame_index: int) -> li
     right["rejected_frames"] = [path for path in right["source_files"] if path in rejected]
     _reset_processing(left)
     _reset_processing(right)
+    _refresh_segment_metadata(left)
+    _refresh_segment_metadata(right)
     return result[:position] + [left, right] + result[position + 1 :]
 
 
-def merge_segments(segments: list[dict], left_id: str, right_id: str) -> list[dict]:
+def merge_segments(
+    segments: list[dict], segment_ids: list[str] | str, right_id: str | None = None
+) -> list[dict]:
     result = deepcopy(segments)
-    left_position = next((i for i, item in enumerate(result) if item.get("id") == left_id), None)
-    right_position = next((i for i, item in enumerate(result) if item.get("id") == right_id), None)
-    if left_position is None or right_position is None:
+    requested = [segment_ids, right_id] if isinstance(segment_ids, str) else list(segment_ids)
+    if len(requested) < 2 or any(not isinstance(item, str) for item in requested):
+        raise ValueError("At least two segment IDs are required")
+    if len(set(requested)) != len(requested):
+        raise ValueError("Segment IDs must not contain duplicates")
+    requested_set = set(requested)
+    positions = [index for index, item in enumerate(result) if item.get("id") in requested_set]
+    if len(positions) != len(requested):
         raise KeyError("Unknown segment ID")
-    if right_position != left_position + 1:
-        raise ValueError("Only adjacent left-to-right segments may be merged")
+    if positions != list(range(positions[0], positions[-1] + 1)):
+        raise ValueError("Only contiguous segments may be merged")
 
-    left = result[left_position]
-    right = result[right_position]
-    left["source_files"] = left.get("source_files", []) + right.get("source_files", [])
-    if "frames" in left or "frames" in right:
-        left["frames"] = left.get("frames", []) + right.get("frames", [])
+    selected = [result[index] for index in positions]
+    left = selected[0]
+    left["source_files"] = [path for segment in selected for path in segment.get("source_files", [])]
+    if any("frames" in segment for segment in selected):
+        left["frames"] = [frame for segment in selected for frame in segment.get("frames", [])]
     left["frame_range"] = {
         "start": int(left.get("frame_range", {}).get("start", 0)),
-        "end": int(right.get("frame_range", {}).get("end", len(left["source_files"]) - 1)),
+        "end": int(selected[-1].get("frame_range", {}).get("end", len(left["source_files"]) - 1)),
     }
-    rejected = set(left.get("rejected_frames", [])) | set(right.get("rejected_frames", []))
+    rejected = set().union(*(set(segment.get("rejected_frames", [])) for segment in selected))
     left["rejected_frames"] = [path for path in left["source_files"] if path in rejected]
     _reset_processing(left)
-    return result[:left_position] + [left] + result[right_position + 1 :]
+    _refresh_segment_metadata(left)
+    return result[:positions[0]] + [left] + result[positions[-1] + 1 :]
 
 
 def reorder_segments(segments: list[dict], ordered_ids: list[str]) -> list[dict]:

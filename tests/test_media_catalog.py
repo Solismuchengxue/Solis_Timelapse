@@ -72,6 +72,9 @@ class SegmentationTests(unittest.TestCase):
         segments = suggest_segments(frames, {})
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["source_files"], [item.path for item in frames])
+        self.assertEqual(segments[0]["focal_length"], 70.0)
+        self.assertIn("2026-05-07", segments[0]["time_range"])
+        self.assertIn("06:10:00", segments[0]["time_range"])
 
     def test_empty_sequence_has_no_segments(self):
         self.assertEqual(suggest_segments([], {}), [])
@@ -107,6 +110,16 @@ class SegmentEditingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             merge_segments(three, three[0]["id"], three[2]["id"])
 
+    def test_merge_accepts_multiple_contiguous_segments(self):
+        two = split_segment(self.segments, self.original_id, 1)
+        three = split_segment(two, two[1]["id"], 1)
+
+        merged = merge_segments(three, [segment["id"] for segment in three])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["source_files"], [frame(index).path for index in range(4)])
+        self.assertEqual(merged[0]["focal_length"], 70.0)
+
     def test_reorder_requires_exact_ids_and_preserves_segments(self):
         split = split_segment(self.segments, self.original_id, 2)
         reordered = reorder_segments(split, [split[1]["id"], split[0]["id"]])
@@ -138,6 +151,19 @@ class SourceScanTests(unittest.TestCase):
                 {item.captured_at for item in scanned}, {"2026-05-07T06:10:00"}
             )
             self.assertEqual(before, after)
+
+    def test_scan_reads_jpeg_capture_time_and_focal_length(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            exif = Image.Exif()
+            exif[36867] = "2026:05:07 06:10:00"
+            exif[37386] = (70, 1)
+            Image.new("RGB", (8, 6), "red").save(source / "frame.jpg", exif=exif)
+
+            scanned = scan_source(source)
+
+            self.assertEqual(scanned[0].captured_at, "2026-05-07T06:10:00")
+            self.assertEqual(scanned[0].focal_length, 70.0)
 
     def test_scan_rejects_missing_directory(self):
         with self.assertRaises(FileNotFoundError):

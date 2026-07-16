@@ -1,5 +1,6 @@
 """Stateless image operations used by the one-pass rendering pipeline."""
 
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,8 @@ RAW_EXTENSIONS = {".arw"}
 GRADE_PRESETS = {
     "punchy": {"sat": 1.25, "con": 1.18, "pivot": 110.0},
     "natural": {"sat": 1.20, "con": 1.12, "pivot": 118.0},
+    "clear": {"sat": 1.10, "con": 1.20, "pivot": 112.0},
+    "custom": {"sat": 1.00, "con": 1.00, "pivot": 118.0},
     "none": {"sat": 1.00, "con": 1.00, "pivot": 118.0},
 }
 GOLDEN_STRENGTH = {"mild": 0.55, "medium": 0.85, "strong": 1.20}
@@ -104,6 +107,39 @@ def load_image(
                 Image.Resampling.BILINEAR,
             )
         return np.asarray(image, dtype=np.float32)
+
+
+def load_preview(
+    path: str | Path,
+    decode: dict | None = None,
+    max_size: tuple[int, int] = (640, 480),
+) -> np.ndarray:
+    """Decode a small analysis preview without changing final render quality."""
+    source_path = Path(path)
+    image = None
+    if is_raw(source_path):
+        try:
+            import rawpy
+
+            with rawpy.imread(str(source_path)) as raw:
+                thumbnail = raw.extract_thumb()
+            if thumbnail.format == rawpy.ThumbFormat.JPEG:
+                image = Image.open(BytesIO(thumbnail.data))
+            else:
+                image = Image.fromarray(thumbnail.data)
+        except (OSError, RuntimeError, ValueError):
+            rgb = load_image(source_path, decode, half=True)
+            image = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8))
+    else:
+        image = Image.open(source_path)
+        image.draft("RGB", max_size)
+
+    try:
+        converted = image.convert("RGB")
+        converted.thumbnail(max_size, Image.Resampling.BILINEAR)
+        return np.asarray(converted, dtype=np.float32)
+    finally:
+        image.close()
 
 
 def measure_luminance(rgb: np.ndarray) -> float:

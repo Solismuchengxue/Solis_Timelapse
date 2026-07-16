@@ -13,6 +13,8 @@ const API = Object.freeze({
   reorder: "/api/segments/reorder",
   thumbnails: (id) => `/api/segments/${encodeURIComponent(id)}/thumbnails`,
   chart: (id) => `/api/segments/${encodeURIComponent(id)}/chart`,
+  frameImage: (id, index) => `/api/segments/${encodeURIComponent(id)}/frames/${index}/image`,
+  segmentVideo: (id) => `/api/segments/${encodeURIComponent(id)}/video`,
   process: "/api/process",
   retry: "/api/process/retry",
   cancel: "/api/tasks/cancel",
@@ -21,11 +23,14 @@ const API = Object.freeze({
   archive: "/api/archive",
   history: "/api/history",
   historyItem: (timestamp) => `/api/history/${encodeURIComponent(timestamp)}`,
-  settings: "/api/settings"
+  logs: "/api/logs",
+  settings: "/api/settings",
+  colorPresets: "/api/color-presets",
+  colorPreset: (id) => `/api/color-presets/${encodeURIComponent(id)}`
 });
 
 const ACTIVE_TASK_STATES = new Set(["queued", "running", "cancelling"]);
-const PAGE_SIZE = 24;
+const PAGE_SIZE = 20;
 const ui = window.SolisUI;
 let preferences = ui.loadPreferences(window.localStorage, window.navigator.language);
 
@@ -33,14 +38,23 @@ const state = {
   project: null,
   task: { status: "idle", progress: 0, logs: [] },
   selectedSegmentId: null,
+  selectedSegmentIds: new Set(),
+  segmentMultiSelect: false,
   selectedFrames: new Set(),
+  frameMultiSelect: false,
   selectionAnchor: null,
   thumbnails: [],
+  thumbnailTotal: 0,
   thumbnailPage: 0,
   chart: null,
   pendingSourcePath: "",
   history: [],
+  logs: [],
   settings: {},
+  colorPresets: [],
+  selectedColorPresetId: null,
+  histogramOpen: true,
+  exportDialogOpen: false,
   pollingTimer: null,
   recipeSaveTimer: null,
   recipeSavePromise: Promise.resolve(),
@@ -69,11 +83,20 @@ function translateDocument() {
   document.title = t("app.title");
 }
 
+function syncPreferenceControls() {
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    button.setAttribute("aria-checked", String(button.dataset.themeChoice === preferences.theme));
+  });
+  document.querySelectorAll("[data-language-choice]").forEach((button) => {
+    button.setAttribute("aria-checked", String(button.dataset.languageChoice === preferences.language));
+  });
+}
+
 function applyTheme(theme) {
   preferences.theme = ui.normalizeTheme(theme);
   localStorage.setItem("solis.theme", preferences.theme);
   ui.applyPreferences(document, preferences);
-  byId("theme-select").value = preferences.theme;
+  syncPreferenceControls();
   drawChart();
   window.dispatchEvent(new CustomEvent("solis:themechange", { detail: { value: preferences.theme } }));
 }
@@ -82,11 +105,13 @@ function applyLanguage(language) {
   preferences.language = ui.normalizeLanguage(language, navigator.language);
   localStorage.setItem("solis.language", preferences.language);
   ui.applyPreferences(document, preferences);
-  byId("language-select").value = preferences.language;
+  syncPreferenceControls();
   translateDocument();
   renderAll();
   renderFrameStrip();
   renderHistory();
+  populateColorPresetSelects();
+  renderColorPresets();
   drawChart();
   window.dispatchEvent(new CustomEvent("solis:languagechange", { detail: { value: preferences.language } }));
 }
@@ -131,6 +156,11 @@ function selectedSegment() {
   return segments().find((segment) => String(segment.id) === String(state.selectedSegmentId)) || null;
 }
 
+function currentSegmentIdsForAction() {
+  const current = selectedSegment();
+  return current ? [current.id] : [];
+}
+
 function taskStatus(task = state.task) {
   return task?.status || task?.state || "idle";
 }
@@ -157,6 +187,9 @@ async function refreshState() {
     state.task = normaliseTask(payload.task || payload.current_task || { status: "idle" });
     if (state.project?.source_dir) state.pendingSourcePath = state.project.source_dir;
     const ids = new Set(segments().map((segment) => String(segment.id)));
+    state.selectedSegmentIds = new Set(
+      [...state.selectedSegmentIds].filter((id) => ids.has(String(id)))
+    );
     if (!state.selectedSegmentId || !ids.has(String(state.selectedSegmentId))) {
       state.selectedSegmentId = segments()[0]?.id || null;
       state.selectedFrames.clear();
@@ -200,6 +233,8 @@ function formatDuration(seconds) {
 function renderSegments() {
   const list = byId("segment-list");
   list.replaceChildren();
+  list.classList.toggle("is-merge-mode", state.segmentMultiSelect);
+  list.setAttribute("aria-multiselectable", String(state.segmentMultiSelect));
   byId("segment-count").textContent = t("segment.count", { count: segments().length });
   if (!segments().length) {
     const empty = document.createElement("div");
@@ -215,21 +250,32 @@ function renderSegments() {
     button.className = "segment-item";
     button.dataset.segmentId = segment.id;
     button.setAttribute("role", "option");
-    const isSelected = String(segment.id) === String(state.selectedSegmentId);
+    const isCurrent = String(segment.id) === String(state.selectedSegmentId);
+    const isSelected = !state.segmentMultiSelect && isCurrent;
     button.classList.toggle("is-selected", isSelected);
-    button.setAttribute("aria-selected", String(isSelected));
+    const isMergeSelected = state.selectedSegmentIds.has(String(segment.id));
+    button.classList.toggle("is-merge-selected", isMergeSelected);
+    button.setAttribute("aria-selected", String(state.segmentMultiSelect ? isMergeSelected : isCurrent));
+
+    const check = document.createElement("span");
+    check.className = "segment-check";
+    check.textContent = isMergeSelected ? "✓" : "";
+    check.setAttribute("aria-hidden", "true");
 
     const name = document.createElement("strong");
     name.textContent = segment.name || t("segment.unnamed");
+    const heading = document.createElement("span");
+    heading.className = "segment-item-heading";
     const meta = document.createElement("span");
     meta.className = "segment-item-meta";
     const focal = segment.focal_length ? `${segment.focal_length}mm` : t("segment.focal_unknown");
     const timeRange = segment.time_range || segment.captured_range || t("segment.time_unknown");
     meta.textContent = t("segment.meta", { count: frameCount(segment), focal, time: timeRange });
     const status = document.createElement("span");
-    status.className = "segment-item-meta";
+    status.className = "segment-item-status";
     status.textContent = statusLabel(segment.status || segment.render_status || "pending");
-    button.append(name, meta, status);
+    heading.append(name, status);
+    button.append(check, heading, meta);
     list.append(button);
   });
 }
@@ -266,16 +312,41 @@ function renderSegmentDetail() {
   byId("gain-limit").value = recipe.deflicker?.gain_limit ?? recipe.gain_limit ?? 2;
   byId("golden-start").value = recipe.golden?.start ?? recipe.golden_start ?? "";
   byId("golden-end").value = recipe.golden?.end ?? recipe.golden_end ?? "";
-  document.querySelectorAll("[data-recipe]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.recipe === recipeName)));
-
-  const representative = segment?.representative_url || segment?.preview_image || state.thumbnails[0]?.url;
   const surface = byId("segment-preview");
   surface.replaceChildren();
-  if (representative) {
+  const selectedFrameIndex = !state.frameMultiSelect && state.selectedFrames.size === 1
+    ? [...state.selectedFrames][0]
+    : null;
+  const selectedFrame = selectedFrameIndex == null
+    ? null
+    : state.thumbnails.find((frame) => Number(frame.index) === selectedFrameIndex);
+  const representative = segment?.representative_url || segment?.preview_image || state.thumbnails[0]?.url;
+  if (segment && selectedFrameIndex != null) {
+    const image = document.createElement("img");
+    image.className = "source-frame-preview";
+    image.src = API.frameImage(segment.id, selectedFrameIndex);
+    image.alt = frameTooltip(selectedFrame || {}, selectedFrameIndex);
+    image.decoding = "async";
+    surface.append(image);
+    attachPreviewHistogram(surface, image);
+    const dimensions = selectedFrame?.width && selectedFrame?.height
+      ? ` · ${selectedFrame.width}×${selectedFrame.height}`
+      : "";
+    byId("preview-caption").textContent = `${selectedFrame?.name || `#${selectedFrameIndex + 1}`}${dimensions}`;
+  } else if (segment?.export_artifact) {
+    const video = document.createElement("video");
+    video.className = "exported-video-preview";
+    video.src = API.segmentVideo(segment.id);
+    video.controls = true;
+    video.preload = "metadata";
+    surface.append(video);
+    byId("preview-caption").textContent = t("history.output");
+  } else if (representative) {
     const image = document.createElement("img");
     image.src = representative;
     image.alt = t("preview.alt", { name: segment.name || t("segment.current") });
     surface.append(image);
+    attachPreviewHistogram(surface, image);
     byId("preview-caption").textContent = segment?.representative_name || segment?.name || t("preview.representative");
   } else {
     const placeholder = document.createElement("span");
@@ -288,32 +359,121 @@ function renderSegmentDetail() {
 async function loadSegmentMedia(segmentId) {
   try {
     const [thumbnailPayload, chartPayload] = await Promise.all([
-      api(`${API.thumbnails(segmentId)}?offset=0&limit=2000`),
+      api(`${API.thumbnails(segmentId)}?offset=0&limit=${PAGE_SIZE}`),
       api(API.chart(segmentId))
     ]);
     if (String(segmentId) !== String(state.selectedSegmentId)) return;
     state.thumbnails = thumbnailPayload.thumbnails || thumbnailPayload.frames || [];
+    state.thumbnailTotal = Number(thumbnailPayload.total || state.thumbnails.length);
     state.chart = chartPayload.chart || chartPayload;
     state.thumbnailPage = 0;
-    state.selectedFrames.clear();
+    state.selectedFrames = state.thumbnailTotal ? new Set([0]) : new Set();
+    state.frameMultiSelect = false;
+    state.selectionAnchor = state.thumbnailTotal ? 0 : null;
     renderFrameStrip();
     drawChart();
     renderSegmentDetail();
   } catch (error) {
     if (error.status !== 404 && error.status !== 409) showError(error);
     state.thumbnails = [];
+    state.thumbnailTotal = 0;
     state.chart = null;
     renderFrameStrip();
     drawChart();
   }
 }
 
+function attachPreviewHistogram(surface, image) {
+  const panel = document.createElement("details");
+  panel.id = "preview-histogram-panel";
+  panel.className = "preview-histogram-panel";
+  panel.open = state.histogramOpen;
+  const summary = document.createElement("summary");
+  summary.textContent = t("preview.histogram");
+  const canvas = document.createElement("canvas");
+  canvas.id = "preview-histogram";
+  canvas.className = "preview-histogram";
+  canvas.width = 256;
+  canvas.height = 96;
+  canvas.setAttribute("aria-label", t("preview.histogram_aria"));
+  panel.append(summary, canvas);
+  panel.addEventListener("toggle", () => { state.histogramOpen = panel.open; });
+  surface.append(panel);
+  const draw = () => drawPreviewHistogram(image);
+  if (image.complete && image.naturalWidth) window.requestAnimationFrame(draw);
+  else image.addEventListener("load", draw, { once: true });
+}
+
+function drawPreviewHistogram(image) {
+  const canvas = byId("preview-histogram");
+  if (!canvas || !image?.naturalWidth) return;
+  const sample = document.createElement("canvas");
+  sample.width = 160;
+  sample.height = 100;
+  const sampleContext = sample.getContext("2d", { willReadFrequently: true });
+  const context = canvas.getContext("2d");
+  if (!sampleContext || !context) return;
+  try {
+    sampleContext.drawImage(image, 0, 0, sample.width, sample.height);
+    const pixels = sampleContext.getImageData(0, 0, sample.width, sample.height).data;
+    const channels = [new Uint32Array(64), new Uint32Array(64), new Uint32Array(64)];
+    for (let index = 0; index < pixels.length; index += 4) {
+      channels[0][pixels[index] >> 2] += 1;
+      channels[1][pixels[index + 1] >> 2] += 1;
+      channels[2][pixels[index + 2] >> 2] += 1;
+    }
+    const maximum = Math.max(1, ...channels.flatMap((values) => [...values]));
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "rgba(9, 13, 12, 0.58)";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.strokeStyle = "rgba(255, 255, 255, 0.12)";
+    context.lineWidth = 1;
+    for (let line = 1; line < 4; line += 1) {
+      const y = Math.round(line * canvas.height / 4) + 0.5;
+      context.beginPath();
+      context.moveTo(0, y);
+      context.lineTo(canvas.width, y);
+      context.stroke();
+    }
+    ["rgba(255, 91, 91, 0.9)", "rgba(78, 224, 150, 0.9)", "rgba(88, 150, 255, 0.9)"].forEach((color, channel) => {
+      context.strokeStyle = color;
+      context.lineWidth = 1.5;
+      context.beginPath();
+      channels[channel].forEach((value, index) => {
+        const x = index / 63 * (canvas.width - 1);
+        const y = canvas.height - 4 - value / maximum * (canvas.height - 10);
+        if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+      });
+      context.stroke();
+    });
+  } catch (_error) {
+    canvas.hidden = true;
+  }
+}
+
+async function loadThumbnailPage(page) {
+  const segmentId = state.selectedSegmentId;
+  if (!segmentId) return;
+  const targetPage = Math.max(0, page);
+  try {
+    const payload = await api(
+      `${API.thumbnails(segmentId)}?offset=${targetPage * PAGE_SIZE}&limit=${PAGE_SIZE}`
+    );
+    if (String(segmentId) !== String(state.selectedSegmentId)) return;
+    state.thumbnails = payload.thumbnails || payload.frames || [];
+    state.thumbnailTotal = Number(payload.total || state.thumbnails.length);
+    state.thumbnailPage = targetPage;
+    renderFrameStrip();
+    renderSegmentDetail();
+  } catch (error) { showError(error); }
+}
+
 function renderFrameStrip() {
   const strip = byId("frame-strip");
   strip.replaceChildren();
-  const totalPages = Math.ceil(state.thumbnails.length / PAGE_SIZE);
+  const totalPages = Math.ceil(state.thumbnailTotal / PAGE_SIZE);
   state.thumbnailPage = clamp(state.thumbnailPage, 0, Math.max(0, totalPages - 1));
-  const pageFrames = state.thumbnails.slice(state.thumbnailPage * PAGE_SIZE, (state.thumbnailPage + 1) * PAGE_SIZE);
+  const pageFrames = state.thumbnails;
   const rejected = new Set((selectedSegment()?.rejected_frames || selectedSegment()?.bad_frames || []).map(stableValue).filter(Boolean));
 
   if (!pageFrames.length) {
@@ -337,9 +497,13 @@ function renderFrameStrip() {
     image.src = frame.url || frame.thumbnail_url || frame.media_url || "";
     image.alt = "";
     image.loading = "lazy";
+    const indexLabel = document.createElement("span");
+    indexLabel.className = "frame-index-badge";
+    indexLabel.textContent = `#${absoluteIndex + 1}`;
     const label = document.createElement("span");
+    label.className = "frame-name";
     label.textContent = frame.name || `#${absoluteIndex + 1}`;
-    button.append(image, label);
+    button.append(image, indexLabel, label);
     strip.append(button);
   });
 
@@ -351,6 +515,7 @@ function renderFrameStrip() {
     ? t("frames.selected_range", { count: selected.length, start: selected[0] + 1, end: selected.at(-1) + 1 })
     : t("frames.none_selected");
   byId("split-frame").value = selected.length === 1 ? selected[0] : byId("split-frame").value;
+  byId("frame-multi-select-btn").setAttribute("aria-pressed", String(state.frameMultiSelect));
   renderActionAvailability();
 }
 
@@ -375,11 +540,43 @@ function frameStableId(frame, index) {
   return stableValue(sourceFrame) || stableValue(frame);
 }
 
+function frameLuminanceChanges(values) {
+  return values.map((rawValue, index) => {
+    if (index === 0) return 0;
+    const current = Number(rawValue);
+    const previous = Number(values[index - 1]);
+    return Number.isFinite(current) && Number.isFinite(previous) ? current - previous : 0;
+  });
+}
+
+function buildVideoChartSeries(chart, chartType, colors) {
+  const measured = chart.luminance || chart.measured_luminance || [];
+  if (chartType === "gain") {
+    return {
+      baseline: 1,
+      series: [{ values: chart.gain || chart.gains || [], color: colors.warning }]
+    };
+  }
+  if (chartType === "change") {
+    return {
+      baseline: 0,
+      series: [{ values: frameLuminanceChanges(measured), color: colors.danger }]
+    };
+  }
+  return {
+    baseline: null,
+    series: [
+      { values: measured, color: colors.muted },
+      { values: chart.target_luminance || chart.target || [], color: colors.accent }
+    ]
+  };
+}
+
 function drawChart() {
   const canvas = byId("brightness-chart");
   const context = canvas.getContext("2d");
   const cssWidth = Math.max(320, Math.floor(canvas.clientWidth || 720));
-  const cssHeight = Math.max(140, Math.floor(canvas.clientHeight || 220));
+  const cssHeight = Math.max(96, Math.floor(canvas.clientHeight || 220));
   const scale = window.devicePixelRatio || 1;
   canvas.width = cssWidth * scale;
   canvas.height = cssHeight * scale;
@@ -388,33 +585,55 @@ function drawChart() {
   context.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--line-strong");
   context.lineWidth = 1;
   context.beginPath();
-  context.moveTo(32, 10);
-  context.lineTo(32, cssHeight - 24);
-  context.lineTo(cssWidth - 8, cssHeight - 24);
+  const axisLeft = 18;
+  const axisTop = 4;
+  const axisBottom = cssHeight - 10;
+  const axisRight = cssWidth - 4;
+  context.moveTo(axisLeft, axisTop);
+  context.lineTo(axisLeft, axisBottom);
+  context.lineTo(axisRight, axisBottom);
   context.stroke();
 
+  const chartType = byId("chart-type-select").value || "brightness";
+  byId("chart-legend").textContent = t(`chart.legend.${chartType}`);
+  canvas.setAttribute("aria-label", `${t("chart.aria")} · ${t(`chart.type.${chartType}`)}`);
+  const styles = getComputedStyle(document.documentElement);
   const chart = state.chart || {};
-  const series = [
-    { values: chart.luminance || chart.measured_luminance || [], color: getComputedStyle(document.documentElement).getPropertyValue("--muted") },
-    { values: chart.target_luminance || chart.target || [], color: getComputedStyle(document.documentElement).getPropertyValue("--accent") },
-    { values: chart.gain || chart.gains || [], color: getComputedStyle(document.documentElement).getPropertyValue("--warning") }
-  ].filter((item) => item.values.length);
+  const chartDefinition = buildVideoChartSeries(chart, chartType, {
+    muted: styles.getPropertyValue("--muted"),
+    accent: styles.getPropertyValue("--accent"),
+    warning: styles.getPropertyValue("--warning"),
+    danger: styles.getPropertyValue("--danger")
+  });
+  const series = chartDefinition.series.filter((item) => item.values.length);
   if (!series.length) {
     context.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
-    context.fillText(t("chart.empty"), 44, cssHeight / 2);
+    context.fillText(t("chart.empty"), axisLeft + 10, cssHeight / 2);
     return;
   }
   const all = series.flatMap((item) => item.values.map(Number).filter(Number.isFinite));
+  if (chartDefinition.baseline != null) all.push(chartDefinition.baseline);
   const min = Math.min(...all);
   const max = Math.max(...all);
   const span = max - min || 1;
+  if (chartDefinition.baseline != null) {
+    const y = axisTop + (1 - (chartDefinition.baseline - min) / span) * (axisBottom - axisTop);
+    context.save();
+    context.setLineDash([4, 4]);
+    context.strokeStyle = styles.getPropertyValue("--line-strong");
+    context.beginPath();
+    context.moveTo(axisLeft, y);
+    context.lineTo(axisRight, y);
+    context.stroke();
+    context.restore();
+  }
   series.forEach((item) => {
     context.strokeStyle = item.color;
     context.lineWidth = 1.7;
     context.beginPath();
     item.values.forEach((rawValue, index) => {
-      const x = 32 + (index / Math.max(1, item.values.length - 1)) * (cssWidth - 40);
-      const y = 10 + (1 - (Number(rawValue) - min) / span) * (cssHeight - 34);
+      const x = axisLeft + (index / Math.max(1, item.values.length - 1)) * (axisRight - axisLeft);
+      const y = axisTop + (1 - (Number(rawValue) - min) / span) * (axisBottom - axisTop);
       if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
     });
     context.stroke();
@@ -437,13 +656,14 @@ function renderTask() {
   byId("task-progress").value = percent;
   byId("task-progress").textContent = `${percent}%`;
   byId("task-progress").setAttribute("aria-valuenow", String(percent));
-  const logs = task.logs || task.log || [];
-  byId("task-log").textContent = Array.isArray(logs) && logs.length ? logs.map((line) => typeof line === "string" ? line : line.message).join("\n") : t("task.no_logs");
+  if (state.exportDialogOpen && task.kind === "export") updateExportDialog(task);
 }
 
 function renderActionAvailability() {
   const busy = isTaskActive();
   const segment = selectedSegment();
+  const renderedSegment = Boolean(segment)
+    && ["rendered", "completed"].includes(segment.render_status || segment.status);
   const segmentIndex = segments().findIndex((item) => String(item.id) === String(state.selectedSegmentId));
   byId("pick-source-btn").disabled = busy;
   byId("scan-btn").disabled = busy || !state.pendingSourcePath;
@@ -451,16 +671,18 @@ function renderActionAvailability() {
   byId("move-up-btn").disabled = busy || segmentIndex <= 0;
   byId("move-down-btn").disabled = busy || segmentIndex < 0 || segmentIndex >= segments().length - 1;
   byId("split-btn").disabled = busy || !segment || !byId("split-frame").value;
-  byId("merge-btn").disabled = busy || segmentIndex < 0 || segmentIndex >= segments().length - 1;
+  byId("segment-multi-select-btn").disabled = busy || segments().length < 2;
+  byId("segment-multi-select-btn").setAttribute("aria-pressed", String(state.segmentMultiSelect));
+  byId("merge-btn").disabled = busy || state.selectedSegmentIds.size < 2;
   byId("bad-frame-btn").disabled = busy || !state.selectedFrames.size;
   byId("unmark-bad-frame-btn").disabled = busy || !state.selectedFrames.size;
-  byId("set-golden-start-btn").disabled = busy || !state.selectedFrames.size;
-  byId("set-golden-end-btn").disabled = busy || !state.selectedFrames.size;
-  byId("process-btn").disabled = busy || !segments().length;
-  byId("retry-btn").disabled = busy || !segment;
+  byId("frame-multi-select-btn").disabled = busy || !segment;
+  byId("process-current-btn").disabled = busy || !segment;
   byId("cancel-btn").disabled = !busy || taskStatus() === "cancelling";
-  byId("export-btn").disabled = busy || !segments().some((item) => ["rendered", "completed"].includes(item.status || item.render_status));
-  byId("archive-btn").disabled = busy || !state.project;
+  byId("export-btn").disabled = busy || !renderedSegment;
+  byId("preview-video-btn").disabled = !segment?.export_artifact;
+  byId("archive-btn").disabled = busy || !renderedSegment || !segment?.export_artifact;
+  byId("clear-logs-btn").disabled = busy || !state.logs.length;
   document.querySelectorAll(".recipe-panel input, .recipe-panel select, .recipe-panel button").forEach((control) => { control.disabled = busy || !segment; });
 }
 
@@ -476,10 +698,15 @@ function updateTaskPolling() {
 async function pollTask() {
   try {
     const previous = taskStatus();
-    state.task = normaliseTask(await api(API.task));
+    const completedTask = normaliseTask(await api(API.task));
+    state.task = completedTask;
     renderTask();
     renderActionAvailability();
-    if (ACTIVE_TASK_STATES.has(previous) && !isTaskActive()) await refreshState();
+    if (byId("view-history").classList.contains("is-active")) await loadLogs();
+    if (ACTIVE_TASK_STATES.has(previous) && !isTaskActive()) {
+      await refreshState();
+      showTaskCompletion(completedTask);
+    }
     updateTaskPolling();
   } catch (error) {
     showError(error);
@@ -488,6 +715,8 @@ async function pollTask() {
 }
 
 function switchView(viewName) {
+  byId("app").dataset.activeView = viewName;
+  byId("source-band").hidden = viewName !== "workbench";
   document.querySelectorAll("[data-view-panel]").forEach((panel) => {
     const active = panel.dataset.viewPanel === viewName;
     panel.classList.toggle("is-active", active);
@@ -499,7 +728,8 @@ function switchView(viewName) {
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
   });
-  if (viewName === "history") loadHistory();
+  if (viewName === "history") Promise.all([loadHistory(), loadLogs()]);
+  if (viewName === "recipes") loadColorPresets();
   if (viewName === "settings") loadSettings();
 }
 
@@ -614,7 +844,7 @@ async function scanSource() {
   await startOperation(API.scan, { source_dir: state.pendingSourcePath });
 }
 
-async function startOperation(path, body = {}) {
+async function startOperation(path, body = {}, options = {}) {
   try {
     clearError();
     const payload = await api(path, { method: "POST", body });
@@ -631,6 +861,7 @@ async function selectSegment(segmentId) {
   state.selectedFrames.clear();
   state.selectionAnchor = null;
   state.thumbnails = [];
+  state.thumbnailTotal = 0;
   state.chart = null;
   renderSegments();
   renderSegmentDetail();
@@ -638,6 +869,139 @@ async function selectSegment(segmentId) {
   drawChart();
   renderActionAvailability();
   await loadSegmentMedia(segmentId);
+}
+
+function openExportDialog() {
+  const dialog = byId("export-progress-dialog");
+  state.exportDialogOpen = true;
+  byId("export-progress-title").textContent = t("dialog.export_progress.title");
+  byId("export-progress-message").textContent = t("dialog.export_progress.preparing");
+  byId("export-progress").value = 0;
+  byId("export-progress").setAttribute("aria-valuenow", "0");
+  byId("export-progress-cancel-btn").hidden = false;
+  byId("export-progress-cancel-btn").disabled = false;
+  byId("export-progress-close-btn").hidden = true;
+  byId("export-progress-preview-btn").hidden = true;
+  if (!dialog.open) dialog.showModal();
+}
+
+function updateExportDialog(task) {
+  if (!state.exportDialogOpen) return;
+  const status = taskStatus(task);
+  const completed = Number(task.completed ?? task.progress?.completed ?? 0);
+  const total = Number(task.total ?? task.progress?.total ?? 0);
+  const rawPercent = task.percent ?? task.progress_percent ?? (total ? completed / total * 100 : status === "completed" ? 100 : 0);
+  const percent = clamp(Math.round(Number(rawPercent) || 0), 0, 100);
+  const progress = byId("export-progress");
+  const cancelButton = byId("export-progress-cancel-btn");
+  const closeButton = byId("export-progress-close-btn");
+  const previewButton = byId("export-progress-preview-btn");
+  progress.value = percent;
+  progress.textContent = `${percent}%`;
+  progress.setAttribute("aria-valuenow", String(percent));
+
+  if (ACTIVE_TASK_STATES.has(status)) {
+    byId("export-progress-title").textContent = status === "cancelling"
+      ? t("dialog.export_progress.cancelling")
+      : t("dialog.export_progress.title");
+    byId("export-progress-message").textContent = task.current_file
+      || task.current_segment
+      || task.message
+      || t("dialog.export_progress.running", { percent });
+    cancelButton.hidden = false;
+    cancelButton.disabled = status === "cancelling";
+    closeButton.hidden = true;
+    previewButton.hidden = true;
+    return;
+  }
+
+  cancelButton.hidden = true;
+  closeButton.hidden = false;
+  if (status === "completed") {
+    const result = task.result || {};
+    byId("export-progress-title").textContent = t("dialog.export_done.title");
+    byId("export-progress-message").textContent = t("dialog.export_done.body", {
+      path: result.output_dir || "-",
+      files: Array.isArray(result.outputs) && result.outputs.length ? result.outputs.join(", ") : "-"
+    });
+    previewButton.hidden = !selectedSegment()?.export_artifact;
+  } else if (status === "cancelled") {
+    byId("export-progress-title").textContent = t("dialog.export_progress.cancelled");
+    byId("export-progress-message").textContent = t("dialog.export_progress.cancelled_body");
+    previewButton.hidden = true;
+  } else {
+    byId("export-progress-title").textContent = t("dialog.export_progress.failed");
+    byId("export-progress-message").textContent = task.error || t("error.unknown");
+    previewButton.hidden = true;
+  }
+}
+
+function closeExportDialog() {
+  state.exportDialogOpen = false;
+  const dialog = byId("export-progress-dialog");
+  if (dialog.open) dialog.close();
+}
+
+function previewCurrentVideo() {
+  const segment = selectedSegment();
+  if (!segment?.export_artifact) return;
+  state.frameMultiSelect = false;
+  state.selectedFrames.clear();
+  state.selectionAnchor = null;
+  renderFrameStrip();
+  renderSegmentDetail();
+  byId("segment-preview").querySelector("video")?.focus();
+}
+
+function showTaskCompletion(completedTask) {
+  if (completedTask.kind === "export") {
+    updateExportDialog(completedTask);
+    return;
+  }
+  if (taskStatus(completedTask) !== "completed") return;
+  const result = completedTask.result || {};
+  const dialog = byId("operation-result-dialog");
+  const title = byId("operation-result-title");
+  const message = byId("operation-result-message");
+  const historyButton = byId("result-history-btn");
+  historyButton.hidden = true;
+  if (completedTask.kind === "archive") {
+    title.textContent = t("dialog.archive_done.title");
+    message.textContent = t("dialog.archive_done.body", { path: result.archive_dir || "-" });
+    historyButton.hidden = false;
+  } else {
+    return;
+  }
+  dialog.showModal();
+}
+
+async function toggleSegmentSelection(segmentId) {
+  const key = String(segmentId);
+  if (state.selectedSegmentIds.has(key)) state.selectedSegmentIds.delete(key);
+  else state.selectedSegmentIds.add(key);
+  const selectedPositions = segments()
+    .map((item, index) => state.selectedSegmentIds.has(String(item.id)) ? index : -1)
+    .filter((index) => index >= 0);
+  if (selectedPositions.length >= 2) {
+    const first = Math.min(...selectedPositions);
+    const last = Math.max(...selectedPositions);
+    state.selectedSegmentIds = new Set(
+      segments().slice(first, last + 1).map((item) => String(item.id))
+    );
+  }
+  if (!state.selectedSegmentId) await selectSegment(segmentId);
+  renderSegments();
+  renderActionAvailability();
+}
+
+function toggleSegmentMultiSelect() {
+  state.segmentMultiSelect = !state.segmentMultiSelect;
+  state.selectedSegmentIds.clear();
+  if (state.segmentMultiSelect && state.selectedSegmentId) {
+    state.selectedSegmentIds.add(String(state.selectedSegmentId));
+  }
+  renderSegments();
+  renderActionAvailability();
 }
 
 async function patchSelectedSegment(values, { refresh = true, throwOnError = false } = {}) {
@@ -686,7 +1050,6 @@ function valueOrNull(value) {
 function scheduleRecipeSave() {
   byId("recipe-strength-value").textContent = `${byId("recipe-strength").value}%`;
   byId("golden-strength-value").textContent = `${byId("golden-strength").value}%`;
-  document.querySelectorAll("[data-recipe]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.recipe === byId("recipe-select").value)));
   const segment = selectedSegment();
   if (!segment) return;
   state.pendingRecipe = { segmentId: segment.id, recipe: recipePayload() };
@@ -722,13 +1085,21 @@ async function splitSegment() {
   } catch (error) { showError(error); }
 }
 
-async function mergeNextSegment() {
-  const index = segments().findIndex((item) => String(item.id) === String(state.selectedSegmentId));
-  if (index < 0 || index >= segments().length - 1) return;
+async function mergeSelectedSegments() {
+  const segmentIds = segments()
+    .filter((item) => state.selectedSegmentIds.has(String(item.id)))
+    .map((item) => item.id);
+  if (segmentIds.length < 2) return;
+  const selectedId = segmentIds[0];
   try {
-    await api(API.merge, { method: "POST", body: { left_id: segments()[index].id, right_id: segments()[index + 1].id } });
+    await api(API.merge, { method: "POST", body: { segment_ids: segmentIds } });
+    state.selectedSegmentId = selectedId;
+    state.selectedSegmentIds.clear();
+    state.segmentMultiSelect = false;
     await refreshState();
-  } catch (error) { showError(error); }
+  } catch (error) {
+    showError(error);
+  }
 }
 
 async function moveSegment(direction) {
@@ -744,7 +1115,10 @@ async function moveSegment(direction) {
 }
 
 function selectFrame(index, extend) {
-  if (extend && state.selectionAnchor != null) {
+  if (!state.frameMultiSelect) {
+    state.selectedFrames = new Set([index]);
+    state.selectionAnchor = index;
+  } else if (extend && state.selectionAnchor != null) {
     const [start, end] = [state.selectionAnchor, index].sort((a, b) => a - b);
     state.selectedFrames = new Set(Array.from({ length: end - start + 1 }, (_, offset) => start + offset));
   } else {
@@ -752,6 +1126,15 @@ function selectFrame(index, extend) {
     state.selectionAnchor = index;
   }
   renderFrameStrip();
+  renderSegmentDetail();
+}
+
+function toggleFrameMultiSelect() {
+  state.frameMultiSelect = !state.frameMultiSelect;
+  state.selectedFrames.clear();
+  state.selectionAnchor = null;
+  renderFrameStrip();
+  renderSegmentDetail();
 }
 
 async function updateRejected(markRejected) {
@@ -759,21 +1142,13 @@ async function updateRejected(markRejected) {
   if (!segment) return;
   const rejected = new Set((segment.rejected_frames || segment.bad_frames || []).map(stableValue).filter(Boolean));
   state.selectedFrames.forEach((index) => {
-    const thumbnail = state.thumbnails[index];
+    const thumbnail = state.thumbnails.find((frame) => Number(frame.index) === index);
     const stableId = frameStableId(thumbnail, index);
     if (!stableId) return;
     if (markRejected) rejected.add(stableId); else rejected.delete(stableId);
   });
   await patchSelectedSegment({ rejected_frames: [...rejected].sort((left, right) => left.localeCompare(right)) });
   renderFrameStrip();
-}
-
-async function setGoldenBoundary(which) {
-  if (!state.selectedFrames.size) return;
-  const index = which === "start" ? Math.min(...state.selectedFrames) : Math.max(...state.selectedFrames);
-  byId(`golden-${which}`).value = index;
-  scheduleRecipeSave();
-  try { await flushRecipeSave(); } catch (error) { showError(error); }
 }
 
 async function cancelTask() {
@@ -785,34 +1160,51 @@ async function cancelTask() {
   } catch (error) { showError(error); }
 }
 
-async function processSegments(fromStage, path) {
+async function processCurrentSegment(fromStage, path) {
   try {
     await flushRecipeSave();
-    const segmentIds = path === API.retry && state.selectedSegmentId
-      ? [state.selectedSegmentId]
-      : segments().map((segment) => segment.id);
+    const segmentIds = currentSegmentIdsForAction();
+    if (!segmentIds.length) return;
     await startOperation(path, { segment_ids: segmentIds, from_stage: fromStage });
   } catch (error) { showError(error); }
 }
 
 async function exportVideo() {
+  const segmentIds = currentSegmentIdsForAction();
+  if (!segmentIds.length) return;
+  openExportDialog();
   try {
     await flushRecipeSave();
     await startOperation(API.export, {
-      segment_ids: state.selectedSegmentId ? [state.selectedSegmentId] : segments().map((segment) => segment.id),
+      segment_ids: segmentIds,
       fps: Number(byId("export-fps").value),
       resolution: byId("export-resolution").value,
       codec: byId("export-codec").value,
       crf: Number(byId("export-crf").value)
-    });
-  } catch (error) { showError(error); }
+    }, { showError: false });
+  } catch (error) {
+    updateExportDialog({ kind: "export", status: "failed", error: error.message });
+  }
+}
+
+function openArchiveDialog() {
+  const segment = selectedSegment();
+  if (!segment) return;
+  byId("archive-dialog-message").textContent = t("dialog.archive.body", {
+    name: segment.name
+  });
+  byId("archive-dialog").showModal();
 }
 
 async function archiveProject() {
   byId("archive-dialog").close();
   try {
     await flushRecipeSave();
-    await startOperation(API.archive, { confirm_workspace_clear: true, preserve_source: true });
+    await startOperation(API.archive, {
+      confirm_archive: true,
+      preserve_source: true,
+      segment_ids: currentSegmentIdsForAction()
+    });
   } catch (error) { showError(error); }
 }
 
@@ -822,7 +1214,11 @@ async function clearProject() {
     await api(API.project, { method: "DELETE", body: { confirm: true } });
     state.project = null;
     state.selectedSegmentId = null;
+    state.pendingSourcePath = "";
     state.thumbnails = [];
+    state.thumbnailTotal = 0;
+    state.selectedSegmentIds.clear();
+    state.segmentMultiSelect = false;
     renderAll();
     renderFrameStrip();
     drawChart();
@@ -845,6 +1241,37 @@ async function loadHistory() {
     list.innerHTML = "";
     showError(error);
   }
+}
+
+async function loadLogs() {
+  try {
+    const payload = await api(API.logs);
+    state.logs = Array.isArray(payload.logs) ? payload.logs : [];
+    renderLogs();
+    renderActionAvailability();
+  } catch (error) { showError(error); }
+}
+
+function renderLogs() {
+  const output = byId("task-log");
+  output.textContent = state.logs.length
+    ? state.logs.map((entry) => {
+        const timestamp = entry.timestamp ? `[${entry.timestamp}]` : "";
+        const level = entry.level ? `[${entry.level}]` : "[INFO]";
+        const kind = entry.kind ? `[${entry.kind}]` : "[system]";
+        return `${timestamp} ${level} ${kind} ${entry.message || entry}`.trim();
+      }).join("\n")
+    : t("task.no_logs");
+  output.scrollTop = output.scrollHeight;
+}
+
+async function clearLogs() {
+  try {
+    await api(API.logs, { method: "DELETE" });
+    state.logs = [];
+    renderLogs();
+    renderActionAvailability();
+  } catch (error) { showError(error); }
 }
 
 async function loadHistoryDetail(summary) {
@@ -963,6 +1390,122 @@ function appendMediaLinks(container, label, items) {
   });
 }
 
+function colorPresetLabel(preset) {
+  const builtinKey = preset?.builtin && ["natural", "clear", "punchy", "custom"].includes(preset.id)
+    ? `recipe.${preset.id}`
+    : null;
+  return builtinKey ? t(builtinKey) : preset?.name || t("presets.unnamed");
+}
+
+function populateColorPresetSelects() {
+  const segmentValue = recipeOf(selectedSegment()).name || byId("recipe-select")?.value || "natural";
+  const settingsValue = state.settings.processing?.default_recipe || byId("settings-default-recipe")?.value || "natural";
+  [["recipe-select", segmentValue], ["settings-default-recipe", settingsValue]].forEach(([id, selected]) => {
+    const select = byId(id);
+    if (!select) return;
+    select.replaceChildren();
+    state.colorPresets.forEach((preset) => {
+      const option = document.createElement("option");
+      option.value = preset.id;
+      option.textContent = colorPresetLabel(preset);
+      select.append(option);
+    });
+    if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+  });
+}
+
+async function loadColorPresets(preferredId = state.selectedColorPresetId) {
+  const payload = await api(API.colorPresets);
+  state.colorPresets = Array.isArray(payload.presets) ? payload.presets : [];
+  const available = new Set(state.colorPresets.map((preset) => preset.id));
+  state.selectedColorPresetId = available.has(preferredId)
+    ? preferredId
+    : available.has(payload.default) ? payload.default : state.colorPresets[0]?.id || null;
+  populateColorPresetSelects();
+  renderColorPresets();
+  if (selectedSegment()) renderSegmentDetail();
+}
+
+function renderColorPresets() {
+  const list = byId("color-preset-list");
+  if (!list) return;
+  list.replaceChildren();
+  state.colorPresets.forEach((preset) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "color-preset-item";
+    button.dataset.colorPresetId = preset.id;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(preset.id === state.selectedColorPresetId));
+    const heading = document.createElement("span");
+    heading.className = "color-preset-item-heading";
+    const name = document.createElement("strong");
+    name.textContent = colorPresetLabel(preset);
+    const kind = document.createElement("span");
+    kind.textContent = preset.builtin ? t("presets.builtin") : t("presets.user");
+    const values = document.createElement("span");
+    values.className = "muted";
+    values.textContent = `S ${preset.sat} · C ${preset.con} · P ${preset.pivot}`;
+    heading.append(name, kind);
+    button.append(heading, values);
+    list.append(button);
+  });
+  fillColorPresetForm(state.colorPresets.find((preset) => preset.id === state.selectedColorPresetId) || null);
+}
+
+function fillColorPresetForm(preset) {
+  byId("color-preset-id").value = preset?.id || "";
+  byId("color-preset-name").value = preset?.name || "";
+  byId("color-preset-sat").value = preset?.sat ?? 1;
+  byId("color-preset-con").value = preset?.con ?? 1;
+  byId("color-preset-pivot").value = preset?.pivot ?? 118;
+  byId("color-preset-kind").textContent = preset
+    ? preset.builtin ? t("presets.builtin") : t("presets.user")
+    : t("presets.new_badge");
+  byId("delete-color-preset-btn").disabled = !preset || preset.builtin;
+}
+
+function selectColorPreset(presetId) {
+  state.selectedColorPresetId = presetId;
+  renderColorPresets();
+}
+
+function newColorPreset() {
+  state.selectedColorPresetId = null;
+  renderColorPresets();
+  byId("color-preset-name").focus();
+}
+
+async function saveColorPreset(event) {
+  event.preventDefault();
+  const presetId = byId("color-preset-id").value;
+  const body = {
+    name: byId("color-preset-name").value.trim(),
+    sat: Number(byId("color-preset-sat").value),
+    con: Number(byId("color-preset-con").value),
+    pivot: Number(byId("color-preset-pivot").value)
+  };
+  try {
+    const payload = await api(presetId ? API.colorPreset(presetId) : API.colorPresets, {
+      method: presetId ? "PUT" : "POST",
+      body
+    });
+    await loadColorPresets(payload.preset?.id || presetId);
+    byId("color-preset-save-status").textContent = t("presets.saved");
+  } catch (error) { showError(error); }
+}
+
+async function deleteColorPreset() {
+  const presetId = byId("color-preset-id").value;
+  const preset = state.colorPresets.find((item) => item.id === presetId);
+  if (!preset || preset.builtin || !window.confirm(t("presets.delete_confirm", { name: colorPresetLabel(preset) }))) return;
+  try {
+    await api(API.colorPreset(presetId), { method: "DELETE" });
+    await loadColorPresets();
+    byId("color-preset-save-status").textContent = t("presets.deleted");
+  } catch (error) { showError(error); }
+}
+
 async function loadSettings() {
   try {
     const payload = await api(API.settings);
@@ -972,11 +1515,13 @@ async function loadSettings() {
 }
 
 function setSettingsForm(settings) {
+  populateColorPresetSelects();
   byId("settings-workspace-dir").value = settings.workspace_dir || "";
   byId("settings-output-dir").value = settings.output_dir || "";
   byId("settings-archive-dir").value = settings.archive_dir || "";
   byId("settings-default-recipe").value = settings.processing?.default_recipe || "natural";
   byId("settings-gap-seconds").value = settings.scan?.gap_seconds ?? 120;
+  byId("settings-log-level").value = settings.logging?.level || "INFO";
   byId("settings-preview-fps").value = settings.preview?.fps ?? 30;
   byId("settings-preview-width").value = settings.preview?.width ?? 1920;
   byId("settings-export-resolution").value = settings.export?.resolution || "4k";
@@ -993,6 +1538,7 @@ async function saveSettings(event) {
     archive_dir: byId("settings-archive-dir").value,
     processing: { default_recipe: byId("settings-default-recipe").value },
     scan: { gap_seconds: Number(byId("settings-gap-seconds").value) },
+    logging: { level: byId("settings-log-level").value },
     preview: { fps: Number(byId("settings-preview-fps").value), width: Number(byId("settings-preview-width").value) },
     export: { resolution: byId("settings-export-resolution").value, codec: byId("settings-export-codec").value, crf: Number(byId("settings-export-crf").value) }
   };
@@ -1016,7 +1562,6 @@ async function pickSettingsDirectory(purpose) {
 function bindEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
   byId("app").querySelector('[role="tablist"]').addEventListener("keydown", handleTabKeydown);
-  byId("open-settings-btn").addEventListener("click", () => switchView("settings"));
   byId("dismiss-error-btn").addEventListener("click", clearError);
   byId("pick-source-btn").addEventListener("click", pickDirectory);
   byId("scan-btn").addEventListener("click", scanSource);
@@ -1024,37 +1569,64 @@ function bindEvents() {
   byId("clear-confirm-btn").addEventListener("click", clearProject);
   byId("segment-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-segment-id]");
-    if (button) selectSegment(button.dataset.segmentId);
+    if (!button) return;
+    if (state.segmentMultiSelect) toggleSegmentSelection(button.dataset.segmentId);
+    else selectSegment(button.dataset.segmentId);
   });
   byId("segment-name").addEventListener("change", (event) => patchSelectedSegment({ name: event.target.value.trim() }));
   byId("split-frame").addEventListener("input", renderActionAvailability);
   byId("split-btn").addEventListener("click", splitSegment);
-  byId("merge-btn").addEventListener("click", mergeNextSegment);
+  byId("segment-multi-select-btn").addEventListener("click", toggleSegmentMultiSelect);
+  byId("merge-btn").addEventListener("click", mergeSelectedSegments);
   byId("move-up-btn").addEventListener("click", () => moveSegment(-1));
   byId("move-down-btn").addEventListener("click", () => moveSegment(1));
-  document.querySelectorAll("[data-recipe]").forEach((button) => button.addEventListener("click", () => { byId("recipe-select").value = button.dataset.recipe; scheduleRecipeSave(); }));
   ["recipe-select", "recipe-strength", "golden-strength", "deflicker-enabled", "deflicker-window", "gain-limit", "golden-start", "golden-end"].forEach((id) => byId(id).addEventListener("input", scheduleRecipeSave));
   byId("frame-strip").addEventListener("click", (event) => {
     const button = event.target.closest("[data-frame-index]");
     if (button) selectFrame(Number(button.dataset.frameIndex), event.shiftKey);
   });
-  byId("frame-page-prev").addEventListener("click", () => { state.thumbnailPage -= 1; renderFrameStrip(); });
-  byId("frame-page-next").addEventListener("click", () => { state.thumbnailPage += 1; renderFrameStrip(); });
+  byId("frame-multi-select-btn").addEventListener("click", toggleFrameMultiSelect);
+  byId("frame-page-prev").addEventListener("click", () => loadThumbnailPage(state.thumbnailPage - 1));
+  byId("frame-page-next").addEventListener("click", () => loadThumbnailPage(state.thumbnailPage + 1));
+  byId("chart-type-select").addEventListener("change", drawChart);
+  byId("chart-type-select").addEventListener("click", (event) => event.stopPropagation());
+  document.querySelector(".frame-summary").addEventListener("click", (event) => {
+    if (event.target.closest("button")) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
   byId("bad-frame-btn").addEventListener("click", () => updateRejected(true));
   byId("unmark-bad-frame-btn").addEventListener("click", () => updateRejected(false));
-  byId("set-golden-start-btn").addEventListener("click", () => setGoldenBoundary("start"));
-  byId("set-golden-end-btn").addEventListener("click", () => setGoldenBoundary("end"));
-  byId("process-btn").addEventListener("click", () => processSegments("analyze", API.process));
-  byId("retry-btn").addEventListener("click", () => processSegments(byId("retry-stage").value, API.retry));
+  byId("process-current-btn").addEventListener("click", () => processCurrentSegment("analyze", API.process));
   byId("cancel-btn").addEventListener("click", cancelTask);
   byId("export-btn").addEventListener("click", exportVideo);
-  byId("archive-btn").addEventListener("click", () => byId("archive-dialog").showModal());
+  byId("preview-video-btn").addEventListener("click", previewCurrentVideo);
+  byId("archive-btn").addEventListener("click", openArchiveDialog);
   byId("archive-confirm-btn").addEventListener("click", archiveProject);
+  byId("export-progress-cancel-btn").addEventListener("click", cancelTask);
+  byId("export-progress-close-btn").addEventListener("click", closeExportDialog);
+  byId("export-progress-preview-btn").addEventListener("click", () => {
+    closeExportDialog();
+    previewCurrentVideo();
+  });
+  byId("result-history-btn").addEventListener("click", () => {
+    byId("operation-result-dialog").close();
+    switchView("history");
+  });
   byId("refresh-history-btn").addEventListener("click", loadHistory);
+  byId("clear-logs-btn").addEventListener("click", clearLogs);
+  byId("color-preset-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-color-preset-id]");
+    if (button) selectColorPreset(button.dataset.colorPresetId);
+  });
+  byId("new-color-preset-btn").addEventListener("click", newColorPreset);
+  byId("color-preset-form").addEventListener("submit", saveColorPreset);
+  byId("delete-color-preset-btn").addEventListener("click", deleteColorPreset);
   byId("settings-form").addEventListener("submit", saveSettings);
   document.querySelectorAll("[data-settings-directory]").forEach((button) => button.addEventListener("click", () => pickSettingsDirectory(button.dataset.settingsDirectory)));
-  byId("theme-select").addEventListener("change", (event) => applyTheme(event.target.value));
-  byId("language-select").addEventListener("change", (event) => applyLanguage(event.target.value));
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => button.addEventListener("click", () => applyTheme(button.dataset.themeChoice)));
+  document.querySelectorAll("[data-language-choice]").forEach((button) => button.addEventListener("click", () => applyLanguage(button.dataset.languageChoice)));
   byId("directory-browser-breadcrumb").addEventListener("click", (event) => {
     const button = event.target.closest("[data-directory-path]");
     if (button) openDirectoryBrowser(button.dataset.directoryPath);
@@ -1073,11 +1645,10 @@ function bindEvents() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  byId("theme-select").value = preferences.theme;
-  byId("language-select").value = preferences.language;
+  syncPreferenceControls();
   translateDocument();
   bindEvents();
-  try { await loadCapabilities(); } catch (error) { showError(error); }
+  try { await Promise.all([loadCapabilities(), loadColorPresets()]); } catch (error) { showError(error); }
   renderFrameStrip();
   drawChart();
   refreshState();

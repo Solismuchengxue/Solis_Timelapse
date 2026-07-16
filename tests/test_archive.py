@@ -101,6 +101,42 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertFalse((self.archive / "2026-07-15_120001").exists())
 
+    def test_selected_segment_archive_keeps_workspace_and_copies_only_selected_output(self):
+        second_dir = self.workspace / "segments" / "seg-2" / "result"
+        second_dir.mkdir(parents=True)
+        (second_dir / "000001.jpg").write_bytes(b"other-result")
+        selected_video = self.output / "selected.mp4"
+        selected_video.write_bytes(b"selected-video")
+        other_video = self.output / "other.mp4"
+        other_video.write_bytes(b"other-video")
+        self.project["segments"][0]["export_artifact"] = {"path": str(selected_video)}
+        self.project["segments"].append({
+            "id": "seg-2",
+            "name": "Other",
+            "frames": [str(self.source_files[0])],
+            "recipe": {"grade": "clear"},
+            "export_artifact": {"path": str(other_video)},
+        })
+
+        destination = archive_project(
+            self.project,
+            self.workspace,
+            self.output,
+            self.archive,
+            timestamp="2026-07-15_120010",
+            segment_ids=["seg-1"],
+            clear_workspace=False,
+        )
+
+        manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["segment_count"], 1)
+        self.assertEqual([item["id"] for item in manifest["segments"]], ["seg-1"])
+        self.assertEqual(manifest["media"]["outputs"], ["output/selected.mp4"])
+        self.assertTrue((destination / "output" / "selected.mp4").is_file())
+        self.assertFalse((destination / "output" / "other.mp4").exists())
+        self.assertTrue((self.workspace / "project.json").is_file())
+        self.assertTrue((self.workspace / "segments" / "seg-2" / "result" / "000001.jpg").is_file())
+
     def test_workspace_cannot_contain_output_or_archive(self):
         with self.assertRaises(ValueError):
             archive_project(

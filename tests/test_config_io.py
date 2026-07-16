@@ -29,6 +29,7 @@ class ConfigIoTests(unittest.TestCase):
         self.assertEqual(config["preview"]["width"], 1280)
         self.assertEqual(config["preview"]["fps"], 30)
         self.assertEqual(config["server"]["port"], 9501)
+        self.assertEqual(config["logging"]["level"], "INFO")
 
     def test_save_only_writes_local_yaml(self):
         original_default = self.default_path.read_text(encoding="utf-8")
@@ -51,6 +52,14 @@ class ConfigIoTests(unittest.TestCase):
         path = config_io.project_path("workspace", "current")
 
         self.assertEqual(path, config_io.ROOT / "workspace" / "current")
+
+    def test_default_color_presets_expose_editable_grade_parameters(self):
+        presets = config_io.DEFAULTS["processing"]["color_presets"]
+
+        self.assertEqual({"natural", "clear", "punchy", "custom"}, set(presets))
+        for preset in presets.values():
+            self.assertEqual({"name", "sat", "con", "pivot"}, set(preset))
+        self.assertNotEqual(presets["clear"], presets["custom"])
 
 
 if __name__ == "__main__":

@@ -133,7 +133,7 @@ class ImagePipelineTests(unittest.TestCase):
         self.assertIn("size", result["sources"][0])
         self.assertIn("mtime_ns", result["sources"][0])
         self.assertIn("anomaly_candidates", result)
-        self.assertEqual(sum(result["histogram_summary"]["counts"]), 8 * 4 * 5)
+        self.assertEqual(sum(result["histogram_summary"]["counts"]), 8 * 8 * 10)
         self.assertEqual(len(result["thumbnails"]), 8)
         self.assertTrue((work_dir / result["representative_frame"]["thumbnail"]).is_file())
         self.assertTrue((work_dir / result["representative_frame"]["image"]).is_file())

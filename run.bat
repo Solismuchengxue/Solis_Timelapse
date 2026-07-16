@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title Sony 延时摄影 WebUI
+title Solis_Timelapse WebUI
 
 echo.
-echo   Sony 延时摄影 WebUI —— 正在启动...
+echo   Solis_Timelapse —— 正在启动...
 echo.
 
 if not exist ".venv\Scripts\python.exe" (

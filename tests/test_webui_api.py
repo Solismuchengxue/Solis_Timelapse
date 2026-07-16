@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 from PIL import Image
 
-from webui.server import create_app
+from webui.server import _recipe_for_pipeline, create_app
 from src.runtime_env import RuntimeEnvironment
 
 
@@ -76,6 +76,14 @@ class WebUiApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202)
             self._wait_for_task("completed")
         return self.client.get("/api/state").get_json()["project"]
+
+    @staticmethod
+    def _archive_body(segment_ids):
+        return {
+            "confirm_archive": True,
+            "preserve_source": True,
+            "segment_ids": list(segment_ids),
+        }
 
     def test_empty_state_has_no_project_and_idle_task(self):
         response = self.client.get("/api/state")
@@ -204,14 +212,70 @@ class WebUiApiTests(unittest.TestCase):
         self.assertTrue((self.root / "local.yaml").exists())
 
     def test_settings_round_trip_uses_frontend_route(self):
-        response = self.client.put("/api/settings", json={"preview": {"width": 1280}})
+        response = self.client.put(
+            "/api/settings",
+            json={"preview": {"width": 1280}, "logging": {"level": "DEBUG"}},
+        )
 
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertEqual(body["settings"]["preview"]["width"], 1280)
+        self.assertEqual(body["settings"]["logging"]["level"], "DEBUG")
         self.assertFalse(body["restart_required"])
         self.assertEqual(body["effective_roots"]["workspace_dir"], str(self.root / "workspace"))
         self.assertEqual(self.client.get("/api/settings").get_json()["settings"]["preview"]["width"], 1280)
+
+    def test_settings_reject_invalid_log_level(self):
+        response = self.client.put(
+            "/api/settings", json={"logging": {"level": "VERBOSE"}}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["code"], "invalid_log_level")
+
+    def test_color_preset_crud_persists_and_builtin_presets_cannot_be_deleted(self):
+        initial = self.client.get("/api/color-presets")
+        self.assertEqual(initial.status_code, 200)
+        presets = initial.get_json()["presets"]
+        self.assertEqual({"natural", "clear", "punchy", "custom"}, {item["id"] for item in presets})
+        self.assertTrue(all(item["builtin"] for item in presets))
+
+        created = self.client.post("/api/color-presets", json={
+            "name": "雪山冷调", "sat": 1.08, "con": 1.22, "pivot": 116,
+        })
+        self.assertEqual(created.status_code, 201)
+        preset = created.get_json()["preset"]
+        self.assertFalse(preset["builtin"])
+
+        updated = self.client.put(f"/api/color-presets/{preset['id']}", json={
+            "name": "雪山通透", "sat": 1.12, "con": 1.24, "pivot": 114,
+        })
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.get_json()["preset"]["name"], "雪山通透")
+
+        reloaded = self.client.get("/api/color-presets").get_json()["presets"]
+        self.assertIn("雪山通透", {item["name"] for item in reloaded})
+        self.assertEqual(self.client.delete(f"/api/color-presets/{preset['id']}").status_code, 200)
+        self.assertNotIn(preset["id"], {
+            item["id"] for item in self.client.get("/api/color-presets").get_json()["presets"]
+        })
+
+        rejected = self.client.delete("/api/color-presets/natural")
+        self.assertEqual(rejected.status_code, 409)
+        self.assertEqual(rejected.get_json()["code"], "preset_builtin")
+
+    def test_pipeline_recipe_resolves_saved_color_parameters_and_strength(self):
+        settings = self.client.get("/api/settings").get_json()["settings"]
+        settings["processing"]["color_presets"]["test"] = {
+            "name": "Test", "sat": 1.4, "con": 1.2, "pivot": 120,
+        }
+
+        recipe = _recipe_for_pipeline({"name": "test", "strength": 50}, settings)
+
+        self.assertEqual(recipe["grade"]["style"], "none")
+        self.assertAlmostEqual(recipe["grade"]["sat"], 1.2)
+        self.assertAlmostEqual(recipe["grade"]["con"], 1.1)
+        self.assertEqual(recipe["grade"]["pivot"], 120)
 
     def test_settings_save_new_safe_roots_for_restart_without_changing_effective_roots(self):
         replacement = self.root / "workspace-next"
@@ -320,6 +384,30 @@ class WebUiApiTests(unittest.TestCase):
         release.set()
         self._wait_for_task("cancelled")
 
+    def test_original_frame_and_exported_video_routes_are_segment_scoped(self):
+        project = self._scan_source(1)
+        segment = project["segments"][0]
+        source_frame = Path(segment["frames"][0]["path"])
+
+        response = self.client.get(
+            f"/api/segments/{segment['id']}/frames/0/image"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, source_frame.read_bytes())
+        response.close()
+        self.assertEqual(
+            self.client.get(f"/api/segments/{segment['id']}/frames/1/image").status_code,
+            404,
+        )
+
+        self._mark_archive_ready(project)
+        completed = self.client.get("/api/tasks/current").get_json()["task"]
+        self.assertEqual(completed["result"]["output_dir"], str(self.root / "output"))
+        response = self.client.get(f"/api/segments/{segment['id']}/video")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"mp4")
+        response.close()
+
     def test_export_archive_and_history_are_async_and_do_not_leak_paths(self):
         project = self._scan_source(1)
         segment = project["segments"][0]
@@ -340,17 +428,21 @@ class WebUiApiTests(unittest.TestCase):
             self._wait_for_task("completed")
 
         with patch("webui.server.archive.archive_project", side_effect=RuntimeError(str(self.root / "secret"))):
-            response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+            response = self.client.post("/api/archive", json=self._archive_body([segment["id"]]))
             self.assertEqual(response.status_code, 202)
             failed = self._wait_for_task("failed")
             self.assertNotIn(str(self.root), failed["error"])
 
-        response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+        response = self.client.post("/api/archive", json=self._archive_body([segment["id"]]))
         self.assertEqual(response.status_code, 202)
-        self._wait_for_task("completed")
+        completed = self._wait_for_task("completed")
+        self.assertEqual(
+            completed["result"]["archive_dir"],
+            str(self.root / "archive" / completed["result"]["timestamp"]),
+        )
         self.assertTrue((self.root / "workspace" / "task.json").is_file())
-        self.assertFalse((self.root / "workspace" / "current" / "task.json").exists())
-        self.assertEqual(list((self.root / "workspace" / "current").iterdir()), [])
+        self.assertTrue((self.root / "workspace" / "current" / "project.json").is_file())
+        self.assertTrue(result_dir.is_dir())
         history = self.client.get("/api/history").get_json()["history"]
         self.assertEqual(len(history), 1)
         self.assertTrue(self.client.get(f"/api/history/{history[0]['timestamp']}").get_json()["manifest"])
@@ -359,7 +451,10 @@ class WebUiApiTests(unittest.TestCase):
         project = self._scan_source(1)
         project_file = self.root / "workspace" / "current" / "project.json"
 
-        response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+        response = self.client.post(
+            "/api/archive",
+            json=self._archive_body([project["segments"][0]["id"]]),
+        )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["code"], "archive_incomplete")
@@ -371,13 +466,16 @@ class WebUiApiTests(unittest.TestCase):
         started = threading.Event()
         release = threading.Event()
 
-        def blocking_archive(_project, _workspace, _output, archive_dir):
+        def blocking_archive(_project, _workspace, _output, archive_dir, **_options):
             started.set()
             release.wait(2)
             return archive_dir / "2026-07-15_130000"
 
         with patch("webui.server.archive.archive_project", side_effect=blocking_archive):
-            response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+            response = self.client.post(
+                "/api/archive",
+                json=self._archive_body([project["segments"][0]["id"]]),
+            )
             self.assertEqual(response.status_code, 202)
             self.assertTrue(started.wait(1))
             cancel = self.client.post("/api/tasks/cancel")
@@ -413,7 +511,7 @@ class WebUiApiTests(unittest.TestCase):
             self.assertEqual(self.client.post("/api/export", json={"segment_ids": [segment["id"]]}).status_code, 202)
             self._wait_for_task("completed")
 
-        response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+        response = self.client.post("/api/archive", json=self._archive_body([segment["id"]]))
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["code"], "archive_incomplete")
@@ -439,7 +537,7 @@ class WebUiApiTests(unittest.TestCase):
             self._wait_for_task("completed")
         frame.write_bytes(b"new-render-version")
 
-        response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+        response = self.client.post("/api/archive", json=self._archive_body([segment["id"]]))
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["code"], "archive_incomplete")
@@ -453,7 +551,7 @@ class WebUiApiTests(unittest.TestCase):
         frame.write_bytes(b"JPE2")
         os.utime(frame, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
 
-        response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+        response = self.client.post("/api/archive", json=self._archive_body([segment["id"]]))
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["code"], "archive_incomplete")
@@ -463,10 +561,45 @@ class WebUiApiTests(unittest.TestCase):
         artifact = Path(project["segments"][0]["export_artifact"]["path"])
         artifact.write_bytes(b"bad")
 
-        response = self.client.post("/api/archive", json={"confirm_workspace_clear": True, "preserve_source": True})
+        response = self.client.post(
+            "/api/archive",
+            json=self._archive_body([project["segments"][0]["id"]]),
+        )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["code"], "archive_incomplete")
+
+    def test_export_and_archive_require_explicit_segment_ids(self):
+        self._scan_source(1)
+
+        export = self.client.post("/api/export", json={})
+        archive_response = self.client.post(
+            "/api/archive",
+            json={"confirm_archive": True, "preserve_source": True},
+        )
+
+        self.assertEqual(export.status_code, 400)
+        self.assertEqual(export.get_json()["code"], "invalid_export")
+        self.assertEqual(archive_response.status_code, 400)
+        self.assertEqual(archive_response.get_json()["code"], "invalid_segment")
+
+    def test_clear_project_does_not_modify_source_output_or_archive(self):
+        project = self._scan_source(1)
+        source_frame = Path(project["segments"][0]["frames"][0]["path"])
+        output = self.root / "output" / "keep.mp4"
+        archive_file = self.root / "archive" / "keep" / "manifest.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        archive_file.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"output")
+        archive_file.write_text("{}", encoding="utf-8")
+
+        response = self.client.delete("/api/project", json={"confirm": True})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.client.get("/api/state").get_json()["project"])
+        self.assertTrue(source_frame.is_file())
+        self.assertEqual(output.read_bytes(), b"output")
+        self.assertEqual(archive_file.read_text(encoding="utf-8"), "{}")
 
     def test_same_name_segments_export_to_distinct_artifacts(self):
         project = self._scan_source(2)
@@ -503,6 +636,25 @@ class WebUiApiTests(unittest.TestCase):
         self.assertTrue(all(Path(artifact["path"]).is_file() for artifact in artifacts))
         self.assertTrue(all(artifact["frame_count"] == 1 for artifact in artifacts))
         self.assertTrue(all(artifact["result_signature"] for artifact in artifacts))
+
+    def test_split_segments_generate_their_own_thumbnail_pages(self):
+        project = self._scan_source(4)
+        original_id = project["segments"][0]["id"]
+
+        response = self.client.post(
+            "/api/segments/split",
+            json={"segment_id": original_id, "frame_index": 2},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        segments = response.get_json()["project"]["segments"]
+        self.assertEqual(len(segments), 2)
+        for segment in segments:
+            payload = self.client.get(
+                f"/api/segments/{segment['id']}/thumbnails?offset=0&limit=24"
+            ).get_json()
+            self.assertEqual(payload["total"], 2)
+            self.assertTrue(all(frame["url"] for frame in payload["thumbnails"]))
 
     def test_history_rejects_windows_and_parent_path_forms(self):
         for timestamp in (
@@ -544,6 +696,42 @@ class WebUiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()["code"], "not_found")
         self.assertIn("error", response.get_json())
+
+    def test_task_log_history_can_be_read_and_cleared(self):
+        project = self._scan_source(1)
+        self.assertTrue(project["segments"])
+
+        response = self.client.get("/api/logs")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["logs"])
+
+        response = self.client.delete("/api/logs")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get("/api/logs").get_json()["logs"], [])
+
+    def test_debug_logs_include_scan_progress_and_summary(self):
+        self.client.put("/api/settings", json={"logging": {"level": "DEBUG"}})
+        self._scan_source(2)
+
+        logs = self.client.get("/api/logs").get_json()["logs"]
+        messages = [entry["message"] for entry in logs]
+        self.assertTrue(any(message.startswith("扫描开始：目录=") for message in messages))
+        self.assertIn("素材读取完成：共 2 帧 · 拍摄时长 0.0 秒", messages)
+        self.assertTrue(any(message.startswith("自动分段完成：") for message in messages))
+        self.assertTrue(any(entry["level"] == "DEBUG" and entry["message"].startswith("进度 ") for entry in logs))
+
+    def test_clear_project_records_scope_and_preserved_outputs(self):
+        self._scan_source(1)
+
+        response = self.client.delete("/api/project", json={"confirm": True})
+
+        self.assertEqual(response.status_code, 200)
+        messages = [
+            entry["message"]
+            for entry in self.client.get("/api/logs").get_json()["logs"]
+        ]
+        self.assertTrue(any("已清除当前项目" in message for message in messages))
+        self.assertTrue(any("源照片、输出视频和归档未删除" in message for message in messages))
 
 
 if __name__ == "__main__":

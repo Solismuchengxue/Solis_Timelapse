@@ -127,8 +127,9 @@ class EndToEndWorkflowTests(unittest.TestCase):
         self.assertTrue(all(path.stat().st_size > 0 for path in outputs))
 
         archive_task = self._post_task("/api/archive", {
-            "confirm_workspace_clear": True,
+            "confirm_archive": True,
             "preserve_source": True,
+            "segment_ids": segment_ids,
         })
         self._assert_sources_unchanged()
 
@@ -143,7 +144,7 @@ class EndToEndWorkflowTests(unittest.TestCase):
         self.assertTrue(all((archive_root / path).stat().st_size > 0 for path in manifest["media"]["outputs"]))
         self.assertEqual(len(list(archive_root.rglob("*.jpg"))), 23)
         current = self.workspace / "current"
-        self.assertTrue(not current.exists() or not any(current.iterdir()))
+        self.assertTrue((current / "project.json").is_file())
 
         history = self.client.get("/api/history").get_json()["history"]
         self.assertEqual([entry["timestamp"] for entry in history], [timestamp])

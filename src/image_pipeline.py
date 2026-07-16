@@ -22,6 +22,7 @@ from .image_ops import (
     golden_ramp_strength,
     grade_by_style,
     load_image,
+    load_preview,
     measure_luminance,
     save_jpeg,
     smooth_median,
@@ -87,6 +88,21 @@ def _thumbnail(rgb: np.ndarray, width: int = 320, height: int = 180) -> np.ndarr
     image = Image.fromarray(pixels)
     image.thumbnail((width, height), Image.Resampling.LANCZOS)
     return np.asarray(image, dtype=np.float32)
+
+
+def write_thumbnail(source: Path, target: Path) -> Path:
+    """Create one UI thumbnail atomically from JPEG or RAW input."""
+    source = Path(source)
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        preview = load_preview(source, max_size=(640, 480))
+        save_jpeg(_thumbnail(preview), temporary, quality=82)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
 
 
 def _fsync_file(path: Path) -> None:
@@ -182,7 +198,7 @@ def analyze_segment(
         for index, path in enumerate(paths):
             _check_cancelled(cancelled)
             identity = _source_identity(path)
-            rgb = load_image(path, decode, half=True)
+            rgb = load_preview(path, decode, max_size=(640, 480))
             measured_value = measure_luminance(rgb)
             if not _same_identity(identity, _source_identity(path)):
                 raise ValueError(f"source identity changed during analysis: {path.name}")

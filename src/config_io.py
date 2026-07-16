@@ -17,10 +17,20 @@ DEFAULTS = {
     "workspace_dir": "workspace",
     "output_dir": "output",
     "archive_dir": "archive",
+    "logging": {"level": "INFO"},
     "scan": {"gap_seconds": 120},
     "preview": {"fps": 30, "width": 1920},
     "export": {"fps": 30, "resolution": "4k", "codec": "h264", "crf": 18},
-    "processing": {"jpeg_quality": 95, "default_recipe": "natural"},
+    "processing": {
+        "jpeg_quality": 95,
+        "default_recipe": "natural",
+        "color_presets": {
+            "natural": {"name": "自然", "sat": 1.20, "con": 1.12, "pivot": 118.0},
+            "clear": {"name": "通透", "sat": 1.10, "con": 1.20, "pivot": 112.0},
+            "punchy": {"name": "色彩强化", "sat": 1.25, "con": 1.18, "pivot": 110.0},
+            "custom": {"name": "自定义", "sat": 1.00, "con": 1.00, "pivot": 118.0},
+        },
+    },
 }
 
 
