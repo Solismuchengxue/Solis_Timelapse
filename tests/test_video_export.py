@@ -50,6 +50,23 @@ class VideoExportTests(unittest.TestCase):
         self.assertIn("scale=3840:2160:force_original_aspect_ratio=decrease", " ".join(command))
         self.assertEqual(command[command.index("-r") + 1], "60")
 
+    def test_preview_width_builds_16_by_9_scale_filter(self):
+        command = self.run_export(
+            codec="h264",
+            resolution="preview",
+            width=1280,
+            crf=24,
+        )["command"]
+        self.assertIn("scale=1280:720:force_original_aspect_ratio=decrease", " ".join(command))
+
+    def test_invalid_preview_width_is_rejected(self):
+        with self.assertRaises(ValueError):
+            export_video(
+                self.frames,
+                self.root / "preview.mp4",
+                {"fps": 30, "resolution": "preview", "width": 1279},
+            )
+
     def test_invalid_fps_is_rejected(self):
         with self.assertRaises(ValueError):
             export_video(self.frames, self.root / "movie.mp4", {"fps": 29})

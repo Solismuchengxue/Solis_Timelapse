@@ -83,8 +83,13 @@ def export_video(
     if codec_name not in CODECS:
         raise ValueError("codec must be h264 or h265")
     resolution = str(options.get("resolution", "4k")).lower()
-    if resolution not in {*RESOLUTIONS, "original"}:
-        raise ValueError("resolution must be 1080p, 4k or original")
+    if resolution not in {*RESOLUTIONS, "original", "preview"}:
+        raise ValueError("resolution must be 1080p, 4k, preview or original")
+    preview_width = None
+    if resolution == "preview":
+        preview_width = int(options.get("width", 1920))
+        if not 320 <= preview_width <= 3840 or preview_width % 2:
+            raise ValueError("preview width must be an even number between 320 and 3840")
     crf = int(options.get("crf", 18))
     if not 0 <= crf <= 51:
         raise ValueError("crf must be between 0 and 51")
@@ -111,8 +116,13 @@ def export_video(
         "-i",
         str(concat_path),
     ]
-    if resolution in RESOLUTIONS:
-        width, height = RESOLUTIONS[resolution]
+    if resolution in RESOLUTIONS or resolution == "preview":
+        if resolution == "preview":
+            width = preview_width
+            height = round(width * 9 / 16)
+            height -= height % 2
+        else:
+            width, height = RESOLUTIONS[resolution]
         command.extend(
             [
                 "-vf",

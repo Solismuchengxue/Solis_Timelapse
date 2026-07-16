@@ -885,16 +885,24 @@ def create_app(overrides: dict | None = None) -> Flask:
         segment = _segment_by_id(project, segment_id)
         artifact = segment.get("export_artifact")
         artifact_value = artifact.get("path") if isinstance(artifact, dict) else None
-        if not isinstance(artifact_value, str):
-            raise ApiError("成片不存在", "not_found", 404)
-        try:
-            artifact_path = Path(artifact_value).resolve(strict=True)
-            artifact_path.relative_to(output.resolve())
-        except (OSError, ValueError):
-            raise ApiError("成片不存在", "not_found", 404) from None
-        if artifact_path.suffix.casefold() != ".mp4" or not artifact_path.is_file():
-            raise ApiError("成片不存在", "not_found", 404)
-        return send_file(artifact_path, mimetype="video/mp4", conditional=True)
+        segment_work_dir = (workspace / "current" / "segments" / segment_id).resolve()
+        preview_value = segment.get("preview_file")
+        candidates = []
+        if isinstance(artifact_value, str):
+            candidates.append((artifact_value, output.resolve()))
+        if isinstance(preview_value, str):
+            candidates.append((preview_value, segment_work_dir))
+        candidates.append((str(segment_work_dir / "preview.mp4"), segment_work_dir))
+
+        for candidate_value, allowed_root in candidates:
+            try:
+                candidate = Path(candidate_value).resolve(strict=True)
+                candidate.relative_to(allowed_root)
+            except (OSError, ValueError):
+                continue
+            if candidate.suffix.casefold() == ".mp4" and candidate.is_file():
+                return send_file(candidate, mimetype="video/mp4", conditional=True)
+        raise ApiError("预览视频或成片不存在", "not_found", 404)
 
     @app.get("/api/segments/<segment_id>/chart")
     def api_chart(segment_id: str):
@@ -970,16 +978,36 @@ def create_app(overrides: dict | None = None) -> Flask:
             context.raise_if_cancelled()
             context.log(f"正在渲染 {segment_name}：输出目录={work_dir / 'result'}")
             result = image_pipeline.render_segment(segment, recipe, analysis, work_dir, progress, context.cancelled)
+            preview_settings = settings_for_task.get("preview", {})
+            preview_path = work_dir / "preview.mp4"
+            preview_options = {
+                "fps": int(preview_settings.get("fps", 30)),
+                "width": int(preview_settings.get("width", 1920)),
+                "resolution": "preview",
+                "codec": "h264",
+                "crf": 24,
+            }
+            context.log(
+                f"正在生成 {segment_name} 预览视频："
+                f"{preview_options['width']}px · {preview_options['fps']} fps"
+            )
+            video_export.export_video(
+                work_dir / "result",
+                preview_path,
+                preview_options,
+                cancelled=context.cancelled,
+            )
             save_project_segment(segment_id, {
                 "analysis": analysis,
                 "render_status": "completed",
                 "output_files": [path.name for path in (work_dir / "result").glob("*.jpg")],
                 "representative_url": f"/media/current/segments/{segment_id}/thumbnails/000000.jpg",
+                "preview_file": str(preview_path),
                 "export_artifact": None,
             })
             context.log(
                 f"渲染完成 {segment_name}：输出={result.frame_count} 帧 · "
-                f"跳过坏帧={result.rejected_count} 帧"
+                f"跳过坏帧={result.rejected_count} 帧 · 预览视频={preview_path.name}"
             )
             completed += len(segment.get("source_files", []))
         store.update(lambda state: {**state, "status": "processed", "active_job_id": None})

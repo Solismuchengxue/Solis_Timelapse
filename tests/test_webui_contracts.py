@@ -111,12 +111,14 @@ class WebUiStaticContractTests(unittest.TestCase):
 
     def test_current_segment_and_original_media_drive_workbench_actions(self):
         self.assertIn("function currentSegmentIdsForAction()", self.js)
+        self.assertIn("function hasSegmentVideo(segment)", self.js)
         self.assertIn("state.selectedSegmentIds", self.js)
         self.assertIn('API.frameImage(segment.id, selectedFrameIndex)', self.js)
         self.assertIn('API.segmentVideo(segment.id)', self.js)
         self.assertIn('className = "source-frame-preview"', self.js)
         self.assertIn('state.selectedFrames = state.thumbnailTotal ? new Set([0]) : new Set()', self.js)
         self.assertIn('className = "exported-video-preview"', self.js)
+        self.assertIn("hasSegmentVideo(segment)", self.js)
         self.assertIn("showTaskCompletion(completedTask)", self.js)
         self.assertIn("segment_ids: segmentIds", self.js)
         export_body = re.search(r"async function exportVideo\(\) \{(.*?)\n\}", self.js, re.DOTALL).group(1)

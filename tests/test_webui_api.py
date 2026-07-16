@@ -408,6 +408,31 @@ class WebUiApiTests(unittest.TestCase):
         self.assertEqual(response.data, b"mp4")
         response.close()
 
+    def test_render_preview_video_route_does_not_require_export(self):
+        project = self._scan_source(1)
+        segment = project["segments"][0]
+        work_dir = self.root / "workspace" / "current" / "segments" / segment["id"]
+        preview = work_dir / "preview.mp4"
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        preview.write_bytes(b"preview-mp4")
+        self.app.extensions["timelapse_store"].update(
+            lambda state: {
+                **state,
+                "segments": [{
+                    **state["segments"][0],
+                    "render_status": "completed",
+                    "preview_file": str(preview),
+                    "export_artifact": None,
+                }],
+            }
+        )
+
+        response = self.client.get(f"/api/segments/{segment['id']}/video")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"preview-mp4")
+        response.close()
+
     def test_export_archive_and_history_are_async_and_do_not_leak_paths(self):
         project = self._scan_source(1)
         segment = project["segments"][0]

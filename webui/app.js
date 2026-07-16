@@ -333,14 +333,16 @@ function renderSegmentDetail() {
       ? ` · ${selectedFrame.width}×${selectedFrame.height}`
       : "";
     byId("preview-caption").textContent = `${selectedFrame?.name || `#${selectedFrameIndex + 1}`}${dimensions}`;
-  } else if (segment?.export_artifact) {
+  } else if (hasSegmentVideo(segment)) {
     const video = document.createElement("video");
     video.className = "exported-video-preview";
     video.src = API.segmentVideo(segment.id);
     video.controls = true;
     video.preload = "metadata";
     surface.append(video);
-    byId("preview-caption").textContent = t("history.output");
+    byId("preview-caption").textContent = segment?.export_artifact
+      ? t("history.output")
+      : t("history.preview");
   } else if (representative) {
     const image = document.createElement("img");
     image.src = representative;
@@ -381,6 +383,10 @@ async function loadSegmentMedia(segmentId) {
     renderFrameStrip();
     drawChart();
   }
+}
+
+function hasSegmentVideo(segment) {
+  return Boolean(segment?.export_artifact || segment?.preview_file);
 }
 
 function attachPreviewHistogram(surface, image) {
@@ -680,7 +686,7 @@ function renderActionAvailability() {
   byId("process-current-btn").disabled = busy || !segment;
   byId("cancel-btn").disabled = !busy || taskStatus() === "cancelling";
   byId("export-btn").disabled = busy || !renderedSegment;
-  byId("preview-video-btn").disabled = !segment?.export_artifact;
+  byId("preview-video-btn").disabled = busy || !hasSegmentVideo(segment);
   byId("archive-btn").disabled = busy || !renderedSegment || !segment?.export_artifact;
   byId("clear-logs-btn").disabled = busy || !state.logs.length;
   document.querySelectorAll(".recipe-panel input, .recipe-panel select, .recipe-panel button").forEach((control) => { control.disabled = busy || !segment; });
@@ -944,7 +950,7 @@ function closeExportDialog() {
 
 function previewCurrentVideo() {
   const segment = selectedSegment();
-  if (!segment?.export_artifact) return;
+  if (!hasSegmentVideo(segment)) return;
   state.frameMultiSelect = false;
   state.selectedFrames.clear();
   state.selectionAnchor = null;
