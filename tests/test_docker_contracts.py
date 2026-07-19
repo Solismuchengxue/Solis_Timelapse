@@ -15,13 +15,16 @@ class DockerContractTests(unittest.TestCase):
 
         self.assertEqual(service["image"], "solis_timelapse")
         self.assertEqual(service["container_name"], "solis_timelapse")
-        self.assertEqual(service["user"], "${PUID}:${PGID}")
+        self.assertIn("${PUID:?", service["user"])
+        self.assertIn("${PGID:?", service["user"])
         self.assertEqual(service["ports"], ["9501:9501"])
-        self.assertIn("${INPUT_PATH}:/media/input:ro", volumes)
-        self.assertIn("${APP_ROOT}/workspace:/media/workspace", volumes)
-        self.assertIn("${APP_ROOT}/output:/media/output", volumes)
-        self.assertIn("${APP_ROOT}/archive:/media/archive", volumes)
-        self.assertIn("${APP_ROOT}/config:/data/config", volumes)
+        self.assertTrue(any(value.startswith("${INPUT_PATH:?") and value.endswith(":/media/input:ro") for value in volumes))
+        for directory in ("workspace", "output", "archive", "config"):
+            container_path = "/data/config" if directory == "config" else f"/media/{directory}"
+            self.assertTrue(any(
+                value.startswith("${APP_ROOT:?") and value.endswith(f"/{directory}:{container_path}")
+                for value in volumes
+            ))
         self.assertNotIn("privileged", service)
         self.assertNotIn("/var/run/docker.sock", "\n".join(volumes))
         self.assertEqual(service["restart"], "unless-stopped")
@@ -58,7 +61,7 @@ class DockerContractTests(unittest.TestCase):
 
         for value in (
             ".git", ".venv", ".superpowers", "tests", "docs",
-            "config/local.yaml", "workspace", "output", "archive",
+            "config/local.yaml", ".env", "workspace", "output", "archive",
         ):
             self.assertIn(value, ignored)
 

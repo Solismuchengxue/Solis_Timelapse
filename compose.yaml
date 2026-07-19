@@ -3,16 +3,16 @@ services:
     image: solis_timelapse
     build: .
     container_name: solis_timelapse
-    user: "${PUID}:${PGID}"
+    user: "${PUID:?请在 .env 中设置飞牛用户 UID}:${PGID:?请在 .env 中设置飞牛用户 GID}"
     environment:
       SOLIS_CONTAINER: "1"
       PYTHONUNBUFFERED: "1"
     ports:
       - "9501:9501"
     volumes:
-      - "${INPUT_PATH}:/media/input:ro"
-      - "${APP_ROOT}/workspace:/media/workspace"
-      - "${APP_ROOT}/output:/media/output"
-      - "${APP_ROOT}/archive:/media/archive"
-      - "${APP_ROOT}/config:/data/config"
+      - "${INPUT_PATH:?请在 .env 中设置照片目录}:/media/input:ro"
+      - "${APP_ROOT:?请在 .env 中设置应用数据目录}/workspace:/media/workspace"
+      - "${APP_ROOT:?请在 .env 中设置应用数据目录}/output:/media/output"
+      - "${APP_ROOT:?请在 .env 中设置应用数据目录}/archive:/media/archive"
+      - "${APP_ROOT:?请在 .env 中设置应用数据目录}/config:/data/config"
     restart: unless-stopped
