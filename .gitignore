@@ -3,6 +3,7 @@ DEVLOG.md
 PLAYBOOK.md
 .codex/
 .agent/
+docs/superpowers/
 
 # Python/runtime files
 __pycache__/
