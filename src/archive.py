@@ -9,9 +9,12 @@ import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .video_export import sanitize_windows_filename
+
+
+ORIGINAL_SUFFIXES = {".arw", ".jpg", ".jpeg"}
 
 
 def _now() -> str:
@@ -101,22 +104,31 @@ def _git_commit() -> str | None:
     return result.stdout.strip() or None
 
 
-def _source_file_count(project: dict) -> int:
-    frame_paths = {
-        str(frame)
-        for segment in project.get("segments", [])
-        for frame in segment.get("frames", segment.get("frame_paths", []))
-    }
-    if frame_paths:
-        return len(frame_paths)
-    source_dir = Path(project.get("source_dir", ""))
-    if not source_dir.is_dir():
-        return 0
-    return sum(
-        1
-        for path in source_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".arw", ".jpg", ".jpeg"}
-    )
+def _segment_source_files(segment: dict, source_root: Path) -> list[tuple[Path, Path]]:
+    frames = segment.get("frames")
+    if not isinstance(frames, list) or not frames:
+        frames = segment.get("source_files", segment.get("frame_paths", []))
+    if not isinstance(frames, list):
+        raise ValueError("segment source files must be a list")
+
+    resolved: list[tuple[Path, Path]] = []
+    seen: set[Path] = set()
+    for frame in frames:
+        value = frame.get("path") if isinstance(frame, dict) else frame
+        if not isinstance(value, str):
+            raise ValueError("segment source file path is invalid")
+        source = Path(value).resolve()
+        try:
+            relative = source.relative_to(source_root)
+        except ValueError as exc:
+            raise ValueError(f"source file is outside project source_dir: {source}") from exc
+        if source in seen:
+            continue
+        if not source.is_file() or source.suffix.casefold() not in ORIGINAL_SUFFIXES:
+            raise FileNotFoundError(f"source file does not exist or is unsupported: {source}")
+        seen.add(source)
+        resolved.append((source, relative))
+    return resolved
 
 
 def archive_project(
@@ -127,6 +139,7 @@ def archive_project(
     timestamp: str | None = None,
     segment_ids: list[str] | None = None,
     clear_workspace: bool = True,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> Path:
     workspace = Path(workspace).resolve()
     output_dir = Path(output_dir).resolve()
@@ -140,13 +153,24 @@ def archive_project(
         raise ValueError("invalid archive timestamp")
     archive_dir.mkdir(parents=True, exist_ok=True)
     destination = archive_dir / archive_name
-    if destination.exists():
+    if timestamp is None:
+        base_name = archive_name
+        sequence = 2
+        while destination.exists():
+            archive_name = f"{base_name}_{sequence:02d}"
+            destination = archive_dir / archive_name
+            sequence += 1
+    elif destination.exists():
         raise FileExistsError(f"archive already exists: {destination}")
     temporary = archive_dir / f".archiving-{archive_name}-{uuid.uuid4().hex}"
     verification: list[tuple[Path, Path]] = []
     segment_manifest = []
-    preview_paths: list[str] = []
     output_paths: list[str] = []
+    source_root = Path(project["source_dir"]).resolve()
+
+    def ensure_not_cancelled() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
 
     all_segments = project.get("segments", [])
     if segment_ids is None:
@@ -161,18 +185,13 @@ def archive_project(
             segment for segment in all_segments
             if str(segment.get("id")) in requested_set
         ]
-    archived_project = {**project, "segments": selected_segments}
-
     try:
+        ensure_not_cancelled()
         temporary.mkdir(parents=True)
-        project_file = workspace / "project.json"
-        if segment_ids is None and project_file.is_file():
-            _copy(project_file, temporary / "project.json", verification)
-        else:
-            _write_json(temporary / "project.json", archived_project)
 
         used_names: set[str] = set()
         for index, segment in enumerate(selected_segments, start=1):
+            ensure_not_cancelled()
             segment_id = _safe_component(segment.get("id"), f"segment-{index}")
             base_name = _safe_component(segment.get("name"), f"segment-{index}")
             segment_name = base_name
@@ -193,52 +212,39 @@ def archive_project(
                 _write_json(archived_segment / "recipe.json", segment.get("recipe", {}))
             if analysis_file.is_file():
                 _copy(analysis_file, archived_segment / "analysis.json", verification)
-            elif "analysis" in segment:
+            elif isinstance(segment.get("analysis"), dict):
                 _write_json(archived_segment / "analysis.json", segment["analysis"])
 
-            result_dir = source_segment / "result"
-            jpeg_count = 0
-            if result_dir.is_dir():
-                for frame in sorted(result_dir.iterdir(), key=lambda path: path.name.casefold()):
-                    if frame.is_file() and frame.suffix.lower() in {".jpg", ".jpeg"}:
-                        _copy(frame, archived_segment / frame.name, verification)
-                        jpeg_count += 1
-
-            preview_candidates = [source_segment / "preview.mp4"]
-            configured_preview = segment.get("preview_file") or segment.get("preview")
-            if configured_preview:
-                preview_candidates.append(Path(configured_preview))
-            preview_destination = None
-            for candidate in preview_candidates:
-                if candidate.is_file():
-                    preview_destination = temporary / f"{segment_name}_preview.mp4"
-                    _copy(candidate, preview_destination, verification)
-                    preview_paths.append(preview_destination.name)
-                    break
+            originals: list[str] = []
+            source_names: list[str] = []
+            for source_file, relative in _segment_source_files(segment, source_root):
+                ensure_not_cancelled()
+                original_destination = archived_segment / "originals" / relative
+                _copy(source_file, original_destination, verification)
+                originals.append(original_destination.relative_to(temporary).as_posix())
+                source_names.append(source_file.name)
 
             segment_manifest.append(
                 {
                     "id": segment.get("id"),
                     "name": segment.get("name", segment_name),
                     "archive_name": segment_name,
-                    "source_frame_count": len(segment.get("frames", segment.get("frame_paths", []))),
-                    "jpeg_count": jpeg_count,
+                    "source_file_count": len(originals),
+                    "first_file": source_names[0] if source_names else None,
+                    "last_file": source_names[-1] if source_names else None,
+                    "originals": originals,
                     "recipe": segment.get("recipe", {}),
-                    "preview": preview_destination.name if preview_destination else None,
+                    "focal_length": segment.get("focal_length"),
+                    "captured_start": segment.get("captured_start"),
+                    "captured_end": segment.get("captured_end"),
+                    "capture_date": segment.get("capture_date"),
+                    "capture_time": segment.get("capture_time"),
+                    "time_range": segment.get("time_range"),
+                    "latitude": segment.get("latitude"),
+                    "longitude": segment.get("longitude"),
+                    "location": segment.get("location"),
                 }
             )
-
-        previews_dir = workspace / "previews"
-        if segment_ids is None and previews_dir.is_dir():
-            for preview in sorted(previews_dir.rglob("*.mp4")):
-                name = sanitize_windows_filename(preview.name)
-                target = temporary / name
-                counter = 2
-                while target.exists():
-                    target = temporary / f"{Path(name).stem}_{counter}.mp4"
-                    counter += 1
-                _copy(preview, target, verification)
-                preview_paths.append(target.name)
 
         if segment_ids is None and output_dir.is_dir():
             for output_file in sorted(path for path in output_dir.rglob("*") if path.is_file()):
@@ -267,19 +273,20 @@ def archive_project(
                 output_paths.append((Path("output") / relative).as_posix())
 
         for source, copied in verification:
+            ensure_not_cancelled()
             if source.stat().st_size != copied.stat().st_size or _digest(source) != _digest(copied):
                 raise OSError(f"archive verification failed: {source.name}")
 
+        ensure_not_cancelled()
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "archived_at": _now(),
             "source_dir": project.get("source_dir"),
-            "source_file_count": _source_file_count(archived_project),
+            "source_file_count": sum(item["source_file_count"] for item in segment_manifest),
             "segment_count": len(segment_manifest),
             "segments": segment_manifest,
             "recipes": [item["recipe"] for item in segment_manifest],
             "media": {
-                "previews": preview_paths,
                 "outputs": output_paths,
             },
             "git_commit": _git_commit(),

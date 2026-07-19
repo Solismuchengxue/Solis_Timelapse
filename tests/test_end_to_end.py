@@ -138,11 +138,12 @@ class EndToEndWorkflowTests(unittest.TestCase):
         manifest = json.loads((archive_root / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["source_file_count"], 24)
         self.assertEqual(manifest["segment_count"], 2)
-        self.assertEqual(sum(item["jpeg_count"] for item in manifest["segments"]), 23)
+        self.assertEqual(sum(item["source_file_count"] for item in manifest["segments"]), 24)
         self.assertEqual(len(manifest["media"]["outputs"]), 2)
         self.assertTrue(all((archive_root / path).is_file() for path in manifest["media"]["outputs"]))
         self.assertTrue(all((archive_root / path).stat().st_size > 0 for path in manifest["media"]["outputs"]))
-        self.assertEqual(len(list(archive_root.rglob("*.jpg"))), 23)
+        self.assertEqual(len(list(archive_root.rglob("originals/*.jpg"))), 24)
+        self.assertFalse(any(path.name.endswith("_preview.mp4") for path in archive_root.iterdir()))
         current = self.workspace / "current"
         self.assertTrue((current / "project.json").is_file())
 

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -8,6 +9,69 @@ from src import image_ops
 
 
 class ImageOpsTests(unittest.TestCase):
+    def test_render_device_resolves_auto_cpu_and_gpu(self):
+        with mock.patch("src.image_ops.gpu_render_available", return_value=True):
+            self.assertEqual(image_ops.resolve_render_device("auto"), "gpu")
+            self.assertEqual(image_ops.resolve_render_device("gpu"), "gpu")
+            self.assertEqual(image_ops.resolve_render_device("cpu"), "cpu")
+
+        with mock.patch("src.image_ops.gpu_render_available", return_value=False):
+            self.assertEqual(image_ops.resolve_render_device("auto"), "cpu")
+            with self.assertRaises(RuntimeError):
+                image_ops.resolve_render_device("gpu")
+
+        with self.assertRaises(ValueError):
+            image_ops.resolve_render_device("quantum")
+
+    def test_cpu_render_adjustments_match_established_pipeline(self):
+        rgb = np.array([[[30.0, 90.0, 180.0], [220.0, 150.0, 45.0]]])
+        expected = image_ops.enhance_golden(
+            image_ops.grade_by_style(image_ops.apply_gain(rgb, 1.05), "natural"),
+            1.2,
+        )
+
+        actual = image_ops.render_adjustments(rgb, 1.05, "natural", None, 1.2, "cpu")
+
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_linear_cpu_render_is_equivalent_to_established_pipeline(self):
+        rgb = np.random.default_rng(7).uniform(0, 255, (48, 64, 3)).astype(np.float32)
+        overrides = {"sat": 1.2, "con": 1.12, "pivot": 118.0}
+        expected = image_ops.grade_by_style(
+            image_ops.apply_gain(rgb, 1.05), "none", overrides
+        )
+
+        actual = image_ops.render_adjustments(
+            rgb, 1.05, "none", overrides, 0.0, "cpu"
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=0.001)
+
+    @unittest.skipUnless(image_ops.gpu_render_available(), "OpenCL GPU is unavailable")
+    def test_gpu_render_adjustments_are_visually_equivalent_to_cpu(self):
+        rgb = np.random.default_rng(42).uniform(0, 255, (48, 64, 3)).astype(np.float32)
+        overrides = {"sat": 1.2, "con": 1.12, "pivot": 118.0}
+
+        cpu = image_ops.render_adjustments(rgb, 1.05, "none", overrides, 1.2, "cpu")
+        gpu = image_ops.render_adjustments(rgb, 1.05, "none", overrides, 1.2, "gpu")
+
+        np.testing.assert_allclose(gpu, cpu, rtol=0, atol=0.1)
+
+    @unittest.skipUnless(image_ops.gpu_render_available(), "OpenCL GPU is unavailable")
+    def test_gpu_render_can_return_compact_uint8_pixels(self):
+        rgb = np.random.default_rng(8).integers(0, 256, (48, 64, 3), dtype=np.uint8)
+        overrides = {"sat": 1.2, "con": 1.12, "pivot": 118.0}
+
+        full = image_ops.render_adjustments(
+            rgb, 1.05, "none", overrides, 1.2, "gpu"
+        )
+        compact = image_ops.render_adjustments(
+            rgb, 1.05, "none", overrides, 1.2, "gpu", output_uint8=True
+        )
+
+        self.assertEqual(compact.dtype, np.uint8)
+        np.testing.assert_allclose(compact, full, rtol=0, atol=1.0)
+
     def test_median_smoothing_and_gain_clipping(self):
         luminance = np.array([10.0, 10.0, 100.0, 10.0, 10.0])
 
@@ -70,6 +134,19 @@ class ImageOpsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 image_ops.save_jpeg(np.array([[[np.nan, 0.0, 0.0]]]), path)
             self.assertFalse(path.exists())
+
+    def test_save_jpeg_uses_uint8_pixels_without_float_validation_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fast.jpg"
+            pixels = np.full((8, 12, 3), 127, dtype=np.uint8)
+
+            with mock.patch(
+                "src.image_ops._finite_rgb",
+                side_effect=AssertionError("uint8 fast path should not make a float copy"),
+            ):
+                image_ops.save_jpeg(pixels, path)
+
+            self.assertTrue(path.exists())
 
     def test_golden_ramp_strength_at_boundaries(self):
         core = (100, 110)

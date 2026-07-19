@@ -1,5 +1,6 @@
 """Stateless image operations used by the one-pass rendering pipeline."""
 
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -17,6 +18,7 @@ GRADE_PRESETS = {
 }
 GOLDEN_STRENGTH = {"mild": 0.55, "medium": 0.85, "strong": 1.20}
 _GAMMA = {"srgb": (2.222, 4.5), "linear": (1.0, 1.0)}
+VALID_RENDER_DEVICES = {"auto", "cpu", "gpu"}
 
 
 def _finite_number(
@@ -82,7 +84,7 @@ def decode_raw(
             output_bps=8,
             gamma=_GAMMA.get(gamma, _GAMMA["srgb"]),
             half_size=half,
-        ).astype(np.float32)
+        )
 
 
 def load_image(
@@ -106,7 +108,7 @@ def load_image(
                 (max(1, image.width // 2), max(1, image.height // 2)),
                 Image.Resampling.BILINEAR,
             )
-        return np.asarray(image, dtype=np.float32)
+        return np.asarray(image, dtype=np.uint8)
 
 
 def load_preview(
@@ -151,7 +153,14 @@ def save_jpeg(rgb: np.ndarray, path: str | Path, quality: int = 95) -> None:
     quality_value = _finite_number(quality, "JPEG quality", 1, 100)
     if not quality_value.is_integer():
         raise ValueError("JPEG quality must be an integer")
-    Image.fromarray(np.clip(_finite_rgb(rgb), 0, 255).astype(np.uint8)).save(
+    pixels = np.asarray(rgb)
+    if pixels.ndim < 1 or pixels.shape[-1] != 3 or pixels.size == 0:
+        raise ValueError("RGB image must be non-empty and have three channels")
+    if pixels.dtype == np.uint8:
+        encoded = np.ascontiguousarray(pixels)
+    else:
+        encoded = np.clip(_finite_rgb(pixels), 0, 255).astype(np.uint8)
+    Image.fromarray(encoded).save(
         output, format="JPEG", quality=int(quality_value)
     )
 
@@ -223,6 +232,204 @@ def grade_by_style(
         }
     )
     return grade(rgb, parameters["sat"], parameters["con"], parameters["pivot"])
+
+
+@lru_cache(maxsize=1)
+def gpu_render_status() -> tuple[bool, str]:
+    """Return whether OpenCV can execute image operations on an OpenCL GPU."""
+    try:
+        import cv2
+
+        cv2.ocl.setUseOpenCL(True)
+        if not cv2.ocl.haveOpenCL() or not cv2.ocl.useOpenCL():
+            return False, "OpenCL unavailable"
+        device = cv2.ocl.Device_getDefault()
+        gpu_type = getattr(cv2.ocl, "DEVICE_TYPE_GPU", 4)
+        if not device.available() or not (device.type() & gpu_type):
+            return False, "OpenCL GPU unavailable"
+        return True, device.name().strip() or "OpenCL GPU"
+    except (AttributeError, ImportError, RuntimeError):
+        return False, "OpenCL GPU unavailable"
+
+
+def gpu_render_available() -> bool:
+    return gpu_render_status()[0]
+
+
+def resolve_render_device(requested: str | None) -> str:
+    device = str(requested or "cpu").casefold()
+    if device not in VALID_RENDER_DEVICES:
+        raise ValueError("render device must be auto, cpu or gpu")
+    if device == "cpu":
+        return "cpu"
+    available = gpu_render_available()
+    if device == "gpu" and not available:
+        raise RuntimeError("GPU rendering requested but no OpenCL GPU is available")
+    return "gpu" if available else "cpu"
+
+
+def _grade_parameters(style: str, overrides: dict | None) -> dict[str, float]:
+    if overrides is not None and not isinstance(overrides, dict):
+        raise ValueError("grade overrides must be a mapping")
+    parameters = dict(GRADE_PRESETS.get(style, GRADE_PRESETS["none"]))
+    parameters.update(
+        {
+            key: value
+            for key, value in (overrides or {}).items()
+            if key in ("sat", "con", "pivot")
+        }
+    )
+    return {
+        "sat": _finite_number(parameters["sat"], "saturation", 0.0, 4.0),
+        "con": _finite_number(parameters["con"], "contrast", 0.0, 4.0),
+        "pivot": _finite_number(parameters["pivot"], "grade pivot", 0.0, 255.0),
+    }
+
+
+def _render_adjustments_gpu(
+    rgb: np.ndarray,
+    gain: float,
+    style: str,
+    overrides: dict | None,
+    golden_strength: float,
+    output_uint8: bool,
+) -> np.ndarray:
+    import cv2
+
+    pixels = np.asarray(rgb)
+    if pixels.ndim < 1 or pixels.shape[-1] != 3 or pixels.size == 0:
+        raise ValueError("RGB image must be non-empty and have three channels")
+    if pixels.dtype != np.uint8:
+        pixels = _finite_rgb(pixels)
+    gain = _finite_number(gain, "exposure gain", 0.0, 16.0)
+    strength = _finite_number(golden_strength, "golden strength", 0.0, 4.0)
+    parameters = _grade_parameters(style, overrides)
+
+    def scale(value, factor: float):
+        return cv2.addWeighted(value, float(factor), value, 0.0, 0.0)
+
+    def clip_channel(value, low: float = 0.0, high: float = 1.0):
+        return cv2.min(cv2.max(value, low), high)
+
+    def clip_rgb(value):
+        return cv2.min(
+            cv2.max(value, (0.0, 0.0, 0.0, 0.0)),
+            (255.0, 255.0, 255.0, 0.0),
+        )
+
+    def download(value):
+        if output_uint8:
+            return cv2.convertScaleAbs(value).get()
+        return value.get()
+
+    source = cv2.UMat(np.ascontiguousarray(pixels))
+    output = clip_rgb(
+        cv2.addWeighted(source, gain, source, 0.0, 0.0, dtype=cv2.CV_32F)
+    )
+    saturation = parameters["sat"]
+    contrast = parameters["con"]
+    base = (1.0 - saturation) / 3.0
+    matrix = np.array(
+        [
+            [saturation + base, base, base],
+            [base, saturation + base, base],
+            [base, base, saturation + base],
+        ],
+        dtype=np.float32,
+    ) * contrast
+    output = cv2.transform(output, matrix)
+    offset = parameters["pivot"] * (1.0 - contrast)
+    output = clip_rgb(cv2.add(output, (offset, offset, offset, 0.0)))
+    if strength <= 0:
+        return download(output)
+
+    hsv = cv2.cvtColor(scale(output, 1.0 / 255.0), cv2.COLOR_RGB2HSV)
+    hue, saturation_channel, value = cv2.split(hsv)
+    hue = scale(hue, 1.0 / 360.0)
+    golden_hue = clip_channel(
+        cv2.add(scale(cv2.absdiff(hue, 0.09), -1.0 / 0.11), 1.0)
+    )
+    lit = clip_channel(cv2.add(scale(value, 1.0 / 0.42), -1.0))
+    golden = cv2.multiply(golden_hue, lit)
+    shadow = clip_channel(cv2.add(scale(value, -1.0 / 0.38), 1.0))
+    value2 = clip_channel(
+        cv2.add(
+            cv2.add(value, scale(golden, 0.18 * strength)),
+            scale(shadow, -0.17 * strength),
+        )
+    )
+    saturation2 = clip_channel(
+        cv2.add(saturation_channel, scale(golden, 0.38 * strength))
+    )
+    hue_target = cv2.subtract(0.075, hue)
+    hue2 = clip_channel(
+        cv2.add(hue, scale(cv2.multiply(golden, hue_target), 0.35 * strength))
+    )
+    adjusted_hsv = cv2.merge([scale(hue2, 360.0), saturation2, value2])
+    output = scale(cv2.cvtColor(adjusted_hsv, cv2.COLOR_HSV2RGB), 255.0)
+    red, green, blue = cv2.split(output)
+    red = cv2.add(red, scale(shadow, -8.0 * strength))
+    blue = cv2.add(blue, scale(shadow, 15.0 * strength))
+    return download(clip_rgb(cv2.merge([red, green, blue])))
+
+
+def _render_linear_cpu(
+    rgb: np.ndarray,
+    gain: float,
+    style: str,
+    overrides: dict | None,
+) -> np.ndarray:
+    """Fuse gain, saturation, and contrast into one SIMD color transform."""
+    import cv2
+
+    pixels = _finite_rgb(rgb)
+    gain = _finite_number(gain, "exposure gain", 0.0, 16.0)
+    parameters = _grade_parameters(style, overrides)
+    saturation = parameters["sat"]
+    contrast = parameters["con"]
+    base = (1.0 - saturation) / 3.0
+    gained = np.clip(
+        cv2.addWeighted(pixels, gain, pixels, 0.0, 0.0), 0, 255
+    )
+    matrix = np.array(
+        [
+            [saturation + base, base, base],
+            [base, saturation + base, base],
+            [base, base, saturation + base],
+        ],
+        dtype=np.float32,
+    ) * contrast
+    offset = parameters["pivot"] * (1.0 - contrast)
+    output = cv2.transform(gained, matrix)
+    output = cv2.add(output, (offset, offset, offset, 0.0))
+    return np.clip(output, 0, 255)
+
+
+def render_adjustments(
+    rgb: np.ndarray,
+    gain: float,
+    style: str,
+    overrides: dict | None,
+    golden_strength: float,
+    device: str = "cpu",
+    *,
+    output_uint8: bool = False,
+) -> np.ndarray:
+    """Apply one frame's established adjustments on the selected processor."""
+    selected = resolve_render_device(device)
+    if selected == "gpu":
+        return _render_adjustments_gpu(
+            rgb, gain, style, overrides, golden_strength, output_uint8
+        )
+    if float(golden_strength) <= 0:
+        output = _render_linear_cpu(rgb, gain, style, overrides)
+    else:
+        output = apply_gain(rgb, gain)
+        output = grade_by_style(output, style, overrides)
+        output = enhance_golden(output, golden_strength)
+    if output_uint8:
+        return np.clip(output, 0, 255).astype(np.uint8)
+    return output
 
 
 def rgb2hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -13,6 +13,7 @@ from PIL import Image
 from src.media_catalog import (
     FrameInfo,
     merge_segments,
+    read_exif_details,
     reorder_segments,
     scan_source,
     split_segment,
@@ -68,13 +69,16 @@ class SegmentationTests(unittest.TestCase):
         )
 
     def test_stable_sequence_remains_one_segment(self):
-        frames = [frame(index) for index in range(5)]
+        frames = [frame(index, latitude=27.102345, longitude=100.175678) for index in range(5)]
         segments = suggest_segments(frames, {})
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["source_files"], [item.path for item in frames])
         self.assertEqual(segments[0]["focal_length"], 70.0)
         self.assertIn("2026-05-07", segments[0]["time_range"])
         self.assertIn("06:10:00", segments[0]["time_range"])
+        self.assertEqual(segments[0]["capture_date"], "2026-05-07")
+        self.assertEqual(segments[0]["capture_time"], "06:10:00–06:10:20")
+        self.assertEqual(segments[0]["location"], "27.102345°N, 100.175678°E")
 
     def test_empty_sequence_has_no_segments(self):
         self.assertEqual(suggest_segments([], {}), [])
@@ -164,6 +168,21 @@ class SourceScanTests(unittest.TestCase):
 
             self.assertEqual(scanned[0].captured_at, "2026-05-07T06:10:00")
             self.assertEqual(scanned[0].focal_length, 70.0)
+
+    def test_read_exif_details_returns_human_readable_tags_without_binary_thumbnail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "frame.jpg"
+            exif = Image.Exif()
+            exif[271] = "SONY"
+            exif[272] = "ZV-E10"
+            Image.new("RGB", (8, 6), "red").save(source, exif=exif)
+
+            entries = read_exif_details(source)
+            tags = {(item["group"], item["tag"]): item["value"] for item in entries}
+
+            self.assertEqual(tags[("Image", "Make")], "SONY")
+            self.assertEqual(tags[("Image", "Model")], "ZV-E10")
+            self.assertNotIn("JPEGThumbnail", {item["tag"] for item in entries})
 
     def test_scan_rejects_missing_directory(self):
         with self.assertRaises(FileNotFoundError):

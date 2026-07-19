@@ -29,6 +29,26 @@ class ProjectStore:
         self.project_path = self.current_dir / "project.json"
         self.temporary_path = self.current_dir / "project.json.tmp"
 
+    def _externalize_analysis(self, state: dict) -> tuple[dict, bool]:
+        normalized = deepcopy(state)
+        changed = False
+        for segment in normalized.get("segments", []):
+            if not isinstance(segment, dict) or not isinstance(segment.get("analysis"), dict):
+                continue
+            segment_id = segment.get("id")
+            if not isinstance(segment_id, str) or not segment_id:
+                continue
+            analysis_path = self.current_dir / "segments" / segment_id / "analysis.json"
+            try:
+                with analysis_path.open("r", encoding="utf-8") as handle:
+                    external_analysis = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(external_analysis, dict):
+                segment["analysis"] = None
+                changed = True
+        return normalized, changed
+
     def create(self, source_dir: Path) -> dict:
         source = Path(source_dir).resolve()
         if not source.is_dir():
@@ -52,12 +72,15 @@ class ProjectStore:
             state = json.load(handle)
         if not isinstance(state, dict):
             raise ValueError("project.json must contain a JSON object")
-        return state
+        normalized, changed = self._externalize_analysis(state)
+        if changed:
+            return self.save(normalized)
+        return normalized
 
     def save(self, state: dict) -> dict:
         if not isinstance(state, dict):
             raise TypeError("Project state must be a dictionary")
-        published = deepcopy(state)
+        published, _ = self._externalize_analysis(state)
         self.current_dir.mkdir(parents=True, exist_ok=True)
         with self.temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(published, handle, ensure_ascii=False, indent=2)

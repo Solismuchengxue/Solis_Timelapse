@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import subprocess
@@ -103,6 +104,72 @@ class WebUiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"SolisUI", response.data)
         response.close()
+
+    def test_frame_exif_route_reads_registered_source_without_exposing_path(self):
+        project = self._scan_source(1)
+        segment = project["segments"][0]
+        source = Path(segment["frames"][0]["path"])
+        entries = [{"group": "Image", "tag": "Model", "value": "ZV-E10"}]
+
+        with patch("webui.server.media_catalog.read_exif_details", return_value=entries) as reader:
+            response = self.client.get(f"/api/segments/{segment['id']}/frames/0/exif")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["entries"], entries)
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["frame"], {"index": 0, "name": source.name})
+        self.assertNotIn("path", json.dumps(body).casefold())
+        reader.assert_called_once_with(source.resolve())
+
+    def test_hdr_merge_uses_registered_frames_and_records_result(self):
+        project = self._scan_source(3)
+        segment = project["segments"][0]
+
+        def fake_merge(paths, output, preview, options, exposure_times=None, **_kwargs):
+            self.assertEqual(paths, [Path(segment["frames"][0]["path"]), Path(segment["frames"][2]["path"])])
+            self.assertEqual(options["mode"], "fusion")
+            self.assertEqual(len(exposure_times), 2)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            preview.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"hdr-jpeg")
+            preview.write_bytes(b"preview-jpeg")
+            return {"mode": "fusion", "frame_count": 2, "width": 12, "height": 8}
+
+        with patch("webui.server.hdr_merge.merge_exposures", side_effect=fake_merge):
+            response = self.client.post("/api/hdr", json={
+                "segment_id": segment["id"],
+                "frame_indices": [0, 2],
+                "mode": "fusion",
+                "output_format": "jpeg",
+            })
+            self.assertEqual(response.status_code, 202)
+            task = self._wait_for_task("completed")
+
+        self.assertEqual(task["kind"], "hdr")
+        result = task["result"]
+        self.assertEqual(result["frame_indices"], [0, 2])
+        self.assertTrue(result["output_name"].endswith(".jpg"))
+        self.assertNotIn(".mp4", result["output_name"])
+        self.assertTrue(result["preview_url"].startswith("/media/current/hdr/"))
+        saved = self.client.get("/api/state").get_json()["project"]
+        self.assertEqual(saved["hdr_results"][-1]["id"], result["id"])
+
+    def test_hdr_merge_rejects_invalid_frame_selection(self):
+        project = self._scan_source(3)
+        segment = project["segments"][0]
+
+        too_few = self.client.post("/api/hdr", json={
+            "segment_id": segment["id"], "frame_indices": [0]
+        })
+        outside = self.client.post("/api/hdr", json={
+            "segment_id": segment["id"], "frame_indices": [0, 99]
+        })
+
+        self.assertEqual(too_few.status_code, 400)
+        self.assertEqual(too_few.get_json()["code"], "invalid_hdr")
+        self.assertEqual(outside.status_code, 400)
+        self.assertEqual(outside.get_json()["code"], "invalid_hdr")
 
     def test_local_capabilities_keep_native_picker(self):
         response = self.client.get("/api/capabilities")
@@ -276,6 +343,16 @@ class WebUiApiTests(unittest.TestCase):
         self.assertAlmostEqual(recipe["grade"]["sat"], 1.2)
         self.assertAlmostEqual(recipe["grade"]["con"], 1.1)
         self.assertEqual(recipe["grade"]["pivot"], 120)
+        self.assertEqual(recipe["render_workers"], 0)
+        self.assertEqual(recipe["render_device"], "auto")
+
+    def test_settings_reject_unknown_render_device(self):
+        response = self.client.put(
+            "/api/settings", json={"processing": {"render_device": "quantum"}}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["code"], "invalid_render_device")
 
     def test_settings_save_new_safe_roots_for_restart_without_changing_effective_roots(self):
         replacement = self.root / "workspace-next"
@@ -363,11 +440,29 @@ class WebUiApiTests(unittest.TestCase):
         response = self.client.post("/api/process", json={"segment_ids": [segment["id"]], "from_stage": "analyze"})
         self.assertEqual(response.status_code, 202)
         self._wait_for_task("completed")
+        persisted = json.loads(
+            (self.root / "workspace" / "current" / "project.json").read_text(encoding="utf-8")
+        )
+        self.assertIsNone(persisted["segments"][0]["analysis"])
         response = self.client.post("/api/process/retry", json={"segment_ids": [segment["id"]], "from_stage": "render"})
         self.assertEqual(response.status_code, 202)
         self._wait_for_task("completed")
         chart = self.client.get(f"/api/segments/{segment['id']}/chart").get_json()["chart"]
         self.assertEqual(len(chart["measured_luminance"]), 3)
+
+    def test_process_progress_weights_analysis_render_and_preview(self):
+        project = self._scan_source(4)
+        segment_id = project["segments"][0]["id"]
+
+        response = self.client.post(
+            "/api/process",
+            json={"segment_ids": [segment_id], "from_stage": "analyze"},
+        )
+        self.assertEqual(response.status_code, 202)
+        task = self._wait_for_task("completed")
+
+        self.assertEqual(task["completed"], 40)
+        self.assertEqual(task["total"], 40)
 
     def test_invalid_input_and_busy_task_use_stable_statuses(self):
         self.assertEqual(self.client.post("/api/project/scan", json={}).status_code, 400)
@@ -433,6 +528,34 @@ class WebUiApiTests(unittest.TestCase):
         self.assertEqual(response.data, b"preview-mp4")
         response.close()
 
+    def test_segment_video_prefers_browser_compatible_preview_over_export(self):
+        project = self._scan_source(1)
+        segment = project["segments"][0]
+        work_dir = self.root / "workspace" / "current" / "segments" / segment["id"]
+        preview = work_dir / "preview.mp4"
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        preview.write_bytes(b"browser-preview")
+        exported = self.root / "output" / "final.mp4"
+        exported.parent.mkdir(parents=True, exist_ok=True)
+        exported.write_bytes(b"large-or-hevc-export")
+        self.app.extensions["timelapse_store"].update(
+            lambda state: {
+                **state,
+                "segments": [{
+                    **state["segments"][0],
+                    "render_status": "completed",
+                    "preview_file": str(preview),
+                    "export_artifact": {"path": str(exported)},
+                }],
+            }
+        )
+
+        response = self.client.get(f"/api/segments/{segment['id']}/video")
+        content = response.data
+        response.close()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(content, b"browser-preview")
+
     def test_export_archive_and_history_are_async_and_do_not_leak_paths(self):
         project = self._scan_source(1)
         segment = project["segments"][0]
@@ -472,6 +595,251 @@ class WebUiApiTests(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertTrue(self.client.get(f"/api/history/{history[0]['timestamp']}").get_json()["manifest"])
 
+    def test_export_normalizes_legacy_source_resolution(self):
+        project = self._scan_source(1)
+        segment = project["segments"][0]
+        result_dir = self.root / "workspace" / "current" / "segments" / segment["id"] / "result"
+        result_dir.mkdir(parents=True)
+        (result_dir / "frame.jpg").write_bytes(b"jpeg")
+        self.app.extensions["timelapse_store"].update(
+            lambda state: {**state, "segments": [{**state["segments"][0], "render_status": "completed"}]}
+        )
+        captured = {}
+
+        def fake_export(_frames, output, options, _progress, cancelled=None):
+            captured.update(options)
+            output.write_bytes(b"mp4")
+            return output
+
+        with patch("webui.server.video_export.export_video", side_effect=fake_export):
+            response = self.client.post(
+                "/api/export",
+                json={"segment_ids": [segment["id"]], "resolution": "source"},
+            )
+            self.assertEqual(response.status_code, 202)
+            self._wait_for_task("completed")
+
+        self.assertEqual(captured["resolution"], "original")
+
+    def test_export_rejects_oversize_original_h264_before_starting_task(self):
+        project = self._scan_source(1)
+        segment = project["segments"][0]
+        result_dir = self.root / "workspace" / "current" / "segments" / segment["id"] / "result"
+        result_dir.mkdir(parents=True)
+        Image.new("RGB", (12, 8), "navy").save(result_dir / "frame.jpg")
+        self.app.extensions["timelapse_store"].update(
+            lambda state: {
+                **state,
+                "segments": [{**state["segments"][0], "render_status": "completed"}],
+            }
+        )
+
+        with (
+            patch("webui.server.video_export._nvenc_available", return_value=True),
+            patch("webui.server.video_export._image_dimensions", return_value=(6024, 4024)),
+        ):
+            response = self.client.post(
+                "/api/export",
+                json={
+                    "segment_ids": [segment["id"]],
+                    "resolution": "original",
+                    "codec": "h264",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["code"], "h264_nvenc_dimension_limit")
+        self.assertIn("6024x4024", response.get_json()["error"])
+        self.assertNotEqual(
+            self.client.get("/api/tasks/current").get_json()["task"]["kind"],
+            "export",
+        )
+
+    def test_export_task_reports_actual_encoded_frame_progress(self):
+        project = self._scan_source(3)
+        segment = project["segments"][0]
+        result_dir = self.root / "workspace" / "current" / "segments" / segment["id"] / "result"
+        result_dir.mkdir(parents=True)
+        for index in range(3):
+            (result_dir / f"frame-{index}.jpg").write_bytes(f"jpeg-{index}".encode())
+        self.app.extensions["timelapse_store"].update(
+            lambda state: {
+                **state,
+                "segments": [{**state["segments"][0], "render_status": "completed"}],
+            }
+        )
+
+        def fake_export(_frames, output, _options, progress, cancelled=None):
+            progress(
+                1,
+                3,
+                file=output.name,
+                encoder="h264_nvenc",
+                fps=12.5,
+                speed="0.5x",
+                eta_seconds=2,
+            )
+            progress(
+                3,
+                3,
+                file=output.name,
+                encoder="h264_nvenc",
+                fps=18.0,
+                speed="0.75x",
+                eta_seconds=0,
+            )
+            output.write_bytes(b"mp4")
+            return output
+
+        with patch("webui.server.video_export.export_video", side_effect=fake_export):
+            response = self.client.post(
+                "/api/export", json={"segment_ids": [segment["id"]]}
+            )
+            self.assertEqual(response.status_code, 202)
+            completed = self._wait_for_task("completed")
+
+        self.assertEqual(completed["completed"], 3)
+        self.assertEqual(completed["total"], 3)
+        self.assertEqual(completed["detail"]["encoder"], "h264_nvenc")
+        self.assertEqual(completed["detail"]["encoded_frames"], 3)
+        self.assertEqual(completed["detail"]["eta_seconds"], 0)
+
+    def test_segment_lifecycle_blocks_repeat_export_and_archive_until_rerender(self):
+        project = self._scan_source(1)
+        segment_id = project["segments"][0]["id"]
+
+        def fake_video_export(_frames, output, _options, progress=None, cancelled=None):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(f"mp4-{output.name}".encode())
+            if progress is not None:
+                progress(1, 1, file=output.name, encoder="test")
+            return output
+
+        with patch("webui.server.video_export.export_video", side_effect=fake_video_export):
+            rendered = self.client.post(
+                "/api/process",
+                json={"segment_ids": [segment_id], "from_stage": "analyze"},
+            )
+            self.assertEqual(rendered.status_code, 202)
+            self._wait_for_task("completed")
+
+            first_export = self.client.post(
+                "/api/export", json={"segment_ids": [segment_id]}
+            )
+            self.assertEqual(first_export.status_code, 202)
+            self._wait_for_task("completed")
+            repeated_export = self.client.post(
+                "/api/export", json={"segment_ids": [segment_id]}
+            )
+            self.assertEqual(repeated_export.status_code, 409)
+            self.assertEqual(repeated_export.get_json()["code"], "already_exported")
+
+            first_archive = self.client.post(
+                "/api/archive", json=self._archive_body([segment_id])
+            )
+            self.assertEqual(first_archive.status_code, 202)
+            first_archive_task = self._wait_for_task("completed")
+            first_archive_dir = Path(first_archive_task["result"]["archive_dir"])
+            repeated_archive = self.client.post(
+                "/api/archive", json=self._archive_body([segment_id])
+            )
+            self.assertEqual(repeated_archive.status_code, 409)
+            self.assertEqual(repeated_archive.get_json()["code"], "already_archived")
+
+            rerendered = self.client.post(
+                "/api/process",
+                json={"segment_ids": [segment_id], "from_stage": "analyze"},
+            )
+            self.assertEqual(rerendered.status_code, 202)
+            self._wait_for_task("completed")
+            segment = self.client.get("/api/state").get_json()["project"]["segments"][0]
+            self.assertIsNone(segment.get("export_artifact"))
+            self.assertIsNone(segment.get("archive_artifact"))
+
+            second_export = self.client.post(
+                "/api/export", json={"segment_ids": [segment_id]}
+            )
+            self.assertEqual(second_export.status_code, 202)
+            self._wait_for_task("completed")
+            second_archive = self.client.post(
+                "/api/archive", json=self._archive_body([segment_id])
+            )
+            self.assertEqual(second_archive.status_code, 202)
+            second_archive_task = self._wait_for_task("completed")
+
+        second_archive_dir = Path(second_archive_task["result"]["archive_dir"])
+        self.assertNotEqual(first_archive_dir, second_archive_dir)
+        self.assertTrue(first_archive_dir.is_dir())
+        self.assertTrue(second_archive_dir.is_dir())
+        segment = self.client.get("/api/state").get_json()["project"]["segments"][0]
+        self.assertEqual(segment["archive_artifact"]["timestamp"], second_archive_dir.name)
+
+    def test_archive_history_delete_requires_confirmation_and_supports_delete_all(self):
+        archive_root = self.root / "archive"
+        for timestamp in ("2026-07-15_120000", "2026-07-15_130000"):
+            item = archive_root / timestamp
+            item.mkdir(parents=True)
+            (item / "manifest.json").write_text(
+                json.dumps({"archived_at": timestamp, "segments": []}),
+                encoding="utf-8",
+            )
+        unmanaged = archive_root / "unmanaged"
+        unmanaged.mkdir()
+        (unmanaged / "keep.txt").write_text("keep", encoding="utf-8")
+
+        denied = self.client.delete("/api/history/2026-07-15_120000", json={})
+        self.assertEqual(denied.status_code, 400)
+        self.assertTrue((archive_root / "2026-07-15_120000").is_dir())
+
+        deleted = self.client.delete(
+            "/api/history/2026-07-15_120000",
+            json={"confirm_delete": True},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse((archive_root / "2026-07-15_120000").exists())
+        self.assertTrue((archive_root / "2026-07-15_130000").is_dir())
+
+        deleted_all = self.client.delete("/api/history", json={"confirm_delete": True})
+        self.assertEqual(deleted_all.status_code, 200)
+        self.assertEqual(deleted_all.get_json()["deleted_count"], 1)
+        self.assertEqual(self.client.get("/api/history").get_json()["history"], [])
+        self.assertTrue((unmanaged / "keep.txt").is_file())
+
+    def test_deleting_archive_history_unlocks_segment_for_rearchive(self):
+        project = self._mark_archive_ready(self._scan_source(1))
+        segment_id = project["segments"][0]["id"]
+
+        first = self.client.post(
+            "/api/archive", json=self._archive_body([segment_id])
+        )
+        self.assertEqual(first.status_code, 202)
+        first_task = self._wait_for_task("completed")
+        first_timestamp = first_task["result"]["timestamp"]
+
+        deleted = self.client.delete(
+            f"/api/history/{first_timestamp}",
+            json={"confirm_delete": True},
+        )
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["unlocked_segment_count"], 1)
+        segment = self.client.get("/api/state").get_json()["project"]["segments"][0]
+        self.assertIsNone(segment.get("archive_artifact"))
+        self.assertIsInstance(segment.get("export_artifact"), dict)
+        preview = self.client.get(f"/api/segments/{segment_id}/video")
+        self.assertEqual(preview.status_code, 200)
+        preview.close()
+
+        second = self.client.post(
+            "/api/archive", json=self._archive_body([segment_id])
+        )
+        self.assertEqual(second.status_code, 202)
+        second_task = self._wait_for_task("completed")
+        second_timestamp = second_task["result"]["timestamp"]
+        self.assertTrue((self.root / "archive" / second_timestamp).is_dir())
+        segment = self.client.get("/api/state").get_json()["project"]["segments"][0]
+        self.assertEqual(segment["archive_artifact"]["timestamp"], second_timestamp)
+
     def test_archive_rejects_incomplete_project_without_clearing_workspace(self):
         project = self._scan_source(1)
         project_file = self.root / "workspace" / "current" / "project.json"
@@ -486,14 +854,15 @@ class WebUiApiTests(unittest.TestCase):
         self.assertTrue(project_file.is_file())
         self.assertEqual(self.client.get("/api/state").get_json()["project"]["source_dir"], project["source_dir"])
 
-    def test_running_archive_cannot_be_cancelled(self):
+    def test_running_archive_can_be_cancelled(self):
         project = self._mark_archive_ready(self._scan_source(1))
         started = threading.Event()
         release = threading.Event()
 
-        def blocking_archive(_project, _workspace, _output, archive_dir, **_options):
+        def blocking_archive(_project, _workspace, _output, archive_dir, **options):
             started.set()
-            release.wait(2)
+            while not release.wait(0.01):
+                options["check_cancelled"]()
             return archive_dir / "2026-07-15_130000"
 
         with patch("webui.server.archive.archive_project", side_effect=blocking_archive):
@@ -504,10 +873,10 @@ class WebUiApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202)
             self.assertTrue(started.wait(1))
             cancel = self.client.post("/api/tasks/cancel")
-            self.assertEqual(cancel.status_code, 409)
-            self.assertEqual(cancel.get_json()["code"], "non_cancellable")
+            self.assertEqual(cancel.status_code, 200)
+            self.assertEqual(cancel.get_json()["task"]["status"], "cancelling")
             release.set()
-            self._wait_for_task("completed")
+            self._wait_for_task("cancelled")
         self.assertEqual(project["segments"][0]["render_status"], "completed")
 
     def test_server_uses_only_public_task_manager_cancellation_api(self):
@@ -515,7 +884,8 @@ class WebUiApiTests(unittest.TestCase):
 
         self.assertNotIn("._lock", server_source)
         self.assertIn("TaskNotCancellable", server_source)
-        self.assertIn("cancellable_while_running=False", server_source)
+        self.assertNotIn('submit("archive", work, cancellable_while_running=False)', server_source)
+        self.assertIn("check_cancelled=context.raise_if_cancelled", server_source)
         self.assertIn("cancelled=context.cancelled", server_source)
 
     def test_archive_rejects_partial_result_even_after_export(self):
@@ -608,23 +978,35 @@ class WebUiApiTests(unittest.TestCase):
         self.assertEqual(archive_response.status_code, 400)
         self.assertEqual(archive_response.get_json()["code"], "invalid_segment")
 
-    def test_clear_project_does_not_modify_source_output_or_archive(self):
+    def test_clear_project_removes_current_workspace_and_output_but_preserves_source_and_archive(self):
         project = self._scan_source(1)
         source_frame = Path(project["segments"][0]["frames"][0]["path"])
-        output = self.root / "output" / "keep.mp4"
+        output = self.root / "output" / "delete.mp4"
+        nested_output = self.root / "output" / "nested" / "delete.jpg"
         archive_file = self.root / "archive" / "keep" / "manifest.json"
         output.parent.mkdir(parents=True, exist_ok=True)
+        nested_output.parent.mkdir(parents=True, exist_ok=True)
         archive_file.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"output")
+        nested_output.write_bytes(b"preview")
         archive_file.write_text("{}", encoding="utf-8")
 
         response = self.client.delete("/api/project", json={"confirm": True})
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(self.client.get("/api/state").get_json()["project"])
+        cleared_state = self.client.get("/api/state").get_json()
+        self.assertIsNone(cleared_state["project"])
+        self.assertEqual(cleared_state["task"]["status"], "idle")
+        self.assertEqual(cleared_state["task"]["completed"], 0)
+        self.assertEqual(cleared_state["task"]["total"], 0)
+        self.assertEqual(cleared_state["task"]["detail"], {})
         self.assertTrue(source_frame.is_file())
-        self.assertEqual(output.read_bytes(), b"output")
+        self.assertFalse((self.root / "workspace" / "current").exists())
+        self.assertFalse(output.exists())
+        self.assertFalse(nested_output.exists())
+        self.assertTrue((self.root / "output").is_dir())
         self.assertEqual(archive_file.read_text(encoding="utf-8"), "{}")
+        self.assertEqual(response.get_json()["cleared"]["output_dir"], str(self.root / "output"))
 
     def test_same_name_segments_export_to_distinct_artifacts(self):
         project = self._scan_source(2)
@@ -680,6 +1062,32 @@ class WebUiApiTests(unittest.TestCase):
             ).get_json()
             self.assertEqual(payload["total"], 2)
             self.assertTrue(all(frame["url"] for frame in payload["thumbnails"]))
+
+    def test_thumbnail_route_returns_entire_segment_without_paging(self):
+        project = self._scan_source(1)
+        segment = project["segments"][0]
+        frame = segment["frames"][0]
+        frame_count = 205
+        self.app.extensions["timelapse_store"].update(
+            lambda state: {
+                **state,
+                "segments": [
+                    {
+                        **state["segments"][0],
+                        "frames": [dict(frame) for _ in range(frame_count)],
+                        "source_files": [frame["path"] for _ in range(frame_count)],
+                    }
+                ],
+            }
+        )
+
+        with patch("webui.server.image_pipeline.write_thumbnail"):
+            response = self.client.get(f"/api/segments/{segment['id']}/thumbnails")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["total"], frame_count)
+        self.assertEqual(len(payload["thumbnails"]), frame_count)
 
     def test_history_rejects_windows_and_parent_path_forms(self):
         for timestamp in (
@@ -745,8 +1153,11 @@ class WebUiApiTests(unittest.TestCase):
         self.assertTrue(any(message.startswith("自动分段完成：") for message in messages))
         self.assertTrue(any(entry["level"] == "DEBUG" and entry["message"].startswith("进度 ") for entry in logs))
 
-    def test_clear_project_records_scope_and_preserved_outputs(self):
+    def test_clear_project_records_deleted_output_and_preserved_archive(self):
         self._scan_source(1)
+        output = self.root / "output" / "delete.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"output")
 
         response = self.client.delete("/api/project", json={"confirm": True})
 
@@ -756,7 +1167,8 @@ class WebUiApiTests(unittest.TestCase):
             for entry in self.client.get("/api/logs").get_json()["logs"]
         ]
         self.assertTrue(any("已清除当前项目" in message for message in messages))
-        self.assertTrue(any("源照片、输出视频和归档未删除" in message for message in messages))
+        self.assertTrue(any("输出目录已清空" in message for message in messages))
+        self.assertTrue(any("源照片和归档目录未删除" in message for message in messages))
 
 
 if __name__ == "__main__":

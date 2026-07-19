@@ -14,7 +14,10 @@ const API = Object.freeze({
   thumbnails: (id) => `/api/segments/${encodeURIComponent(id)}/thumbnails`,
   chart: (id) => `/api/segments/${encodeURIComponent(id)}/chart`,
   frameImage: (id, index) => `/api/segments/${encodeURIComponent(id)}/frames/${index}/image`,
+  frameExif: (id, index) => `/api/segments/${encodeURIComponent(id)}/frames/${index}/exif`,
   segmentVideo: (id) => `/api/segments/${encodeURIComponent(id)}/video`,
+  hdr: "/api/hdr",
+  hdrResults: "/api/hdr/results",
   process: "/api/process",
   retry: "/api/process/retry",
   cancel: "/api/tasks/cancel",
@@ -30,7 +33,6 @@ const API = Object.freeze({
 });
 
 const ACTIVE_TASK_STATES = new Set(["queued", "running", "cancelling"]);
-const PAGE_SIZE = 20;
 const ui = window.SolisUI;
 let preferences = ui.loadPreferences(window.localStorage, window.navigator.language);
 
@@ -45,7 +47,6 @@ const state = {
   selectionAnchor: null,
   thumbnails: [],
   thumbnailTotal: 0,
-  thumbnailPage: 0,
   chart: null,
   pendingSourcePath: "",
   history: [],
@@ -53,8 +54,12 @@ const state = {
   settings: {},
   colorPresets: [],
   selectedColorPresetId: null,
+  hdrSelection: null,
+  hdrResult: null,
   histogramOpen: true,
+  scanDialogOpen: false,
   exportDialogOpen: false,
+  archiveDialogOpen: false,
   pollingTimer: null,
   recipeSaveTimer: null,
   recipeSavePromise: Promise.resolve(),
@@ -112,6 +117,7 @@ function applyLanguage(language) {
   renderHistory();
   populateColorPresetSelects();
   renderColorPresets();
+  renderHdr();
   drawChart();
   window.dispatchEvent(new CustomEvent("solis:languagechange", { detail: { value: preferences.language } }));
 }
@@ -194,6 +200,11 @@ async function refreshState() {
       state.selectedSegmentId = segments()[0]?.id || null;
       state.selectedFrames.clear();
     }
+    const hdrResults = Array.isArray(state.project?.hdr_results) ? state.project.hdr_results : [];
+    if (!state.hdrResult || !hdrResults.some((result) => result.id === state.hdrResult?.id)) {
+      state.hdrResult = hdrResults.at(-1) || null;
+    }
+    if (state.hdrSelection && !ids.has(String(state.hdrSelection.segmentId))) state.hdrSelection = null;
     renderAll();
     updateTaskPolling();
     if (state.selectedSegmentId) await loadSegmentMedia(state.selectedSegmentId);
@@ -268,12 +279,33 @@ function renderSegments() {
     heading.className = "segment-item-heading";
     const meta = document.createElement("span");
     meta.className = "segment-item-meta";
-    const focal = segment.focal_length ? `${segment.focal_length}mm` : t("segment.focal_unknown");
-    const timeRange = segment.time_range || segment.captured_range || t("segment.time_unknown");
-    meta.textContent = t("segment.meta", { count: frameCount(segment), focal, time: timeRange });
+    const capture = segmentCaptureMetadata(segment);
+    const frameAndFocal = document.createElement("span");
+    frameAndFocal.className = "segment-item-meta-line";
+    frameAndFocal.textContent = t("segment.meta_frame_focal", {
+      count: frameCount(segment),
+      focal: capture.focal
+    });
+    const dateAndTime = document.createElement("span");
+    dateAndTime.className = "segment-item-meta-line";
+    dateAndTime.textContent = t("segment.meta_date_time", {
+      date: capture.date,
+      time: capture.time
+    });
+    const exposure = document.createElement("span");
+    exposure.className = "segment-item-meta-line";
+    exposure.textContent = t("segment.meta_exposure", {
+      aperture: capture.aperture,
+      shutter: capture.shutter,
+      iso: capture.iso
+    });
+    const location = document.createElement("span");
+    location.className = "segment-item-meta-line";
+    location.textContent = t("segment.meta_location", { location: capture.location });
+    meta.append(frameAndFocal, dateAndTime, exposure, location);
     const status = document.createElement("span");
     status.className = "segment-item-status";
-    status.textContent = statusLabel(segment.status || segment.render_status || "pending");
+    status.textContent = statusLabel(segmentWorkflowStatus(segment));
     heading.append(name, status);
     button.append(check, heading, meta);
     list.append(button);
@@ -291,13 +323,73 @@ function recipeOf(segment) {
   return recipe;
 }
 
+function segmentWorkflowStatus(segment) {
+  if (segment?.archive_artifact) return "archived";
+  if (segment?.export_artifact) return "exported";
+  return segment?.render_status || segment?.status || "pending";
+}
+
+function frameLocation(frame = {}) {
+  const latitude = Number(frame.latitude);
+  const longitude = Number(frame.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return t("preview.unknown");
+  const latitudeRef = latitude >= 0 ? "N" : "S";
+  const longitudeRef = longitude >= 0 ? "E" : "W";
+  return `${Math.abs(latitude).toFixed(6)}°${latitudeRef}, ${Math.abs(longitude).toFixed(6)}°${longitudeRef}`;
+}
+
+function exposureBiasValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return t("preview.unknown");
+  const prefix = number > 0 ? "+" : "";
+  return `${prefix}${compactNumber(number, 2)} EV`;
+}
+
+function renderPreviewCaption(title, frame = null, frameIndex = null) {
+  const caption = byId("preview-caption");
+  caption.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.className = "preview-caption-title";
+  heading.textContent = title;
+  caption.append(heading);
+  if (!frame || frameIndex == null) return;
+
+  const metadata = document.createElement("span");
+  metadata.className = "preview-frame-metadata";
+  const focal = frame.focal_length != null ? `${compactNumber(frame.focal_length, 1)}mm` : t("preview.unknown");
+  const aperture = frame.aperture != null ? `f/${compactNumber(frame.aperture, 1)}` : t("preview.unknown");
+  const shutter = Number(frame.shutter) > 0 ? shutterValue(Number(frame.shutter)) : t("preview.unknown");
+  const iso = frame.iso != null ? `ISO ${compactNumber(frame.iso, 0)}` : t("preview.unknown");
+  [
+    t("preview.focal", { value: focal }),
+    t("preview.aperture", { value: aperture }),
+    t("preview.shutter", { value: shutter }),
+    iso,
+    t("preview.location", { value: frameLocation(frame) }),
+    t("preview.exposure_bias", { value: exposureBiasValue(frame.exposure_bias) })
+  ].forEach((value) => {
+    const item = document.createElement("span");
+    item.textContent = value;
+    metadata.append(item);
+  });
+  caption.append(metadata);
+
+  const button = document.createElement("button");
+  button.id = "preview-exif-btn";
+  button.type = "button";
+  button.className = "preview-exif-button";
+  button.dataset.frameIndex = String(frameIndex);
+  button.textContent = t("exif.open");
+  caption.append(button);
+}
+
 function renderSegmentDetail() {
   const segment = selectedSegment();
   const recipe = recipeOf(segment);
   byId("segment-name").value = segment?.name || "";
   byId("segment-name").disabled = !segment || isTaskActive();
   const segmentStatus = byId("segment-status");
-  const value = segment?.status || segment?.render_status || "idle";
+  const value = segment ? segmentWorkflowStatus(segment) : "idle";
   segmentStatus.dataset.status = value;
   segmentStatus.textContent = segment ? statusLabel(value) : t("segment.none");
 
@@ -332,7 +424,11 @@ function renderSegmentDetail() {
     const dimensions = selectedFrame?.width && selectedFrame?.height
       ? ` · ${selectedFrame.width}×${selectedFrame.height}`
       : "";
-    byId("preview-caption").textContent = `${selectedFrame?.name || `#${selectedFrameIndex + 1}`}${dimensions}`;
+    renderPreviewCaption(
+      `${selectedFrame?.name || `#${selectedFrameIndex + 1}`}${dimensions}`,
+      selectedFrame,
+      selectedFrameIndex
+    );
   } else if (hasSegmentVideo(segment)) {
     const video = document.createElement("video");
     video.className = "exported-video-preview";
@@ -340,35 +436,64 @@ function renderSegmentDetail() {
     video.controls = true;
     video.preload = "metadata";
     surface.append(video);
-    byId("preview-caption").textContent = segment?.export_artifact
-      ? t("history.output")
-      : t("history.preview");
+    renderPreviewCaption(segment?.preview_file ? t("history.preview") : t("history.output"));
   } else if (representative) {
     const image = document.createElement("img");
     image.src = representative;
     image.alt = t("preview.alt", { name: segment.name || t("segment.current") });
     surface.append(image);
     attachPreviewHistogram(surface, image);
-    byId("preview-caption").textContent = segment?.representative_name || segment?.name || t("preview.representative");
+    renderPreviewCaption(segment?.representative_name || segment?.name || t("preview.representative"));
   } else {
     const placeholder = document.createElement("span");
     placeholder.textContent = segment ? t("preview.waiting") : t("preview.none");
     surface.append(placeholder);
-    byId("preview-caption").textContent = segment ? t("segment.frames_only", { count: frameCount(segment) }) : t("preview.select");
+    renderPreviewCaption(segment ? t("segment.frames_only", { count: frameCount(segment) }) : t("preview.select"));
+  }
+}
+
+async function openExifDialog(frameIndex) {
+  const segment = selectedSegment();
+  if (!segment || !Number.isInteger(frameIndex)) return;
+  const dialog = byId("exif-dialog");
+  const summary = byId("exif-dialog-summary");
+  const body = byId("exif-table-body");
+  const empty = byId("exif-empty");
+  body.replaceChildren();
+  empty.hidden = true;
+  summary.textContent = t("exif.loading");
+  dialog.showModal();
+  try {
+    const payload = await api(API.frameExif(segment.id, frameIndex));
+    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    byId("exif-dialog-title").textContent = t("exif.title_for", { name: payload.frame?.name || `#${frameIndex + 1}` });
+    summary.textContent = t("exif.count", { count: entries.length });
+    entries.forEach((entry) => {
+      const row = document.createElement("tr");
+      [entry.group, entry.tag, entry.value].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.textContent = value || "";
+        row.append(cell);
+      });
+      body.append(row);
+    });
+    empty.hidden = entries.length > 0;
+  } catch (error) {
+    summary.textContent = error.message || t("exif.failed");
+    empty.hidden = false;
   }
 }
 
 async function loadSegmentMedia(segmentId) {
   try {
     const [thumbnailPayload, chartPayload] = await Promise.all([
-      api(`${API.thumbnails(segmentId)}?offset=0&limit=${PAGE_SIZE}`),
+      api(API.thumbnails(segmentId)),
       api(API.chart(segmentId))
     ]);
     if (String(segmentId) !== String(state.selectedSegmentId)) return;
     state.thumbnails = thumbnailPayload.thumbnails || thumbnailPayload.frames || [];
     state.thumbnailTotal = Number(thumbnailPayload.total || state.thumbnails.length);
     state.chart = chartPayload.chart || chartPayload;
-    state.thumbnailPage = 0;
     state.selectedFrames = state.thumbnailTotal ? new Set([0]) : new Set();
     state.frameMultiSelect = false;
     state.selectionAnchor = state.thumbnailTotal ? 0 : null;
@@ -383,6 +508,80 @@ async function loadSegmentMedia(segmentId) {
     renderFrameStrip();
     drawChart();
   }
+}
+
+function captureDateTime(value) {
+  const match = String(value || "").match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+  return match ? { date: match[1], time: match[2] } : { date: null, time: null };
+}
+
+function frameMetricValues(segment, key) {
+  return (segment.frames || [])
+    .map((frame) => Number(frame?.[key]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+function compactNumber(value, maximumFractionDigits = 2) {
+  return Number(value).toLocaleString("en-US", {
+    useGrouping: false,
+    maximumFractionDigits
+  });
+}
+
+function metricBounds(segment, key) {
+  const values = frameMetricValues(segment, key);
+  if (!values.length) return null;
+  return [Math.min(...values), Math.max(...values)];
+}
+
+function apertureSummary(segment) {
+  const bounds = metricBounds(segment, "aperture");
+  if (!bounds) return t("segment.aperture_unknown");
+  const values = bounds.map((value) => `f/${compactNumber(value, 1)}`);
+  return Math.abs(bounds[1] - bounds[0]) < 0.05 ? values[0] : values.join("–");
+}
+
+function shutterValue(value) {
+  if (value < 1) return `1/${compactNumber(Math.round(1 / value), 0)}s`;
+  return `${compactNumber(value, 2)}s`;
+}
+
+function shutterSummary(segment) {
+  const bounds = metricBounds(segment, "shutter");
+  if (!bounds) return t("segment.shutter_unknown");
+  const values = bounds.map(shutterValue);
+  return Math.abs(bounds[1] - bounds[0]) < 0.000001 ? values[0] : values.join("–");
+}
+
+function isoSummary(segment) {
+  const bounds = metricBounds(segment, "iso");
+  if (!bounds) return t("segment.iso_unknown");
+  const values = bounds.map((value) => compactNumber(value, 0));
+  return `ISO ${Math.abs(bounds[1] - bounds[0]) < 0.5 ? values[0] : values.join("–")}`;
+}
+
+function segmentCaptureMetadata(segment = {}) {
+  const start = captureDateTime(segment.captured_start);
+  const end = captureDateTime(segment.captured_end);
+  const date = segment.capture_date
+    || (start.date && end.date ? start.date === end.date ? start.date : `${start.date}–${end.date}` : null)
+    || t("segment.date_unknown");
+  const time = segment.capture_time
+    || (start.time && end.time ? `${start.time}–${end.time}` : null)
+    || t("segment.time_unknown");
+  const focal = segment.focal_length != null && segment.focal_length !== ""
+    ? `${segment.focal_length}mm`
+    : t("segment.focal_unknown");
+  const location = segment.location || t("segment.location_unknown");
+  return {
+    date,
+    time,
+    focal,
+    aperture: apertureSummary(segment),
+    shutter: shutterSummary(segment),
+    iso: isoSummary(segment),
+    location
+  };
 }
 
 function hasSegmentVideo(segment) {
@@ -457,40 +656,22 @@ function drawPreviewHistogram(image) {
   }
 }
 
-async function loadThumbnailPage(page) {
-  const segmentId = state.selectedSegmentId;
-  if (!segmentId) return;
-  const targetPage = Math.max(0, page);
-  try {
-    const payload = await api(
-      `${API.thumbnails(segmentId)}?offset=${targetPage * PAGE_SIZE}&limit=${PAGE_SIZE}`
-    );
-    if (String(segmentId) !== String(state.selectedSegmentId)) return;
-    state.thumbnails = payload.thumbnails || payload.frames || [];
-    state.thumbnailTotal = Number(payload.total || state.thumbnails.length);
-    state.thumbnailPage = targetPage;
-    renderFrameStrip();
-    renderSegmentDetail();
-  } catch (error) { showError(error); }
-}
-
 function renderFrameStrip() {
   const strip = byId("frame-strip");
+  const scrollTop = strip.scrollTop;
   strip.replaceChildren();
-  const totalPages = Math.ceil(state.thumbnailTotal / PAGE_SIZE);
-  state.thumbnailPage = clamp(state.thumbnailPage, 0, Math.max(0, totalPages - 1));
-  const pageFrames = state.thumbnails;
+  const loadedFrames = state.thumbnails;
   const rejected = new Set((selectedSegment()?.rejected_frames || selectedSegment()?.bad_frames || []).map(stableValue).filter(Boolean));
 
-  if (!pageFrames.length) {
+  if (!loadedFrames.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = selectedSegment() ? t("frames.empty") : t("frames.select_segment");
     strip.append(empty);
   }
 
-  pageFrames.forEach((frame, pageIndex) => {
-    const absoluteIndex = Number(frame.index ?? state.thumbnailPage * PAGE_SIZE + pageIndex);
+  loadedFrames.forEach((frame, loadedIndex) => {
+    const absoluteIndex = Number(frame.index ?? loadedIndex);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "frame-thumb";
@@ -512,10 +693,7 @@ function renderFrameStrip() {
     button.append(image, indexLabel, label);
     strip.append(button);
   });
-
-  byId("frame-page-label").textContent = t("frames.page", { current: totalPages ? state.thumbnailPage + 1 : 0, total: totalPages });
-  byId("frame-page-prev").disabled = state.thumbnailPage <= 0;
-  byId("frame-page-next").disabled = state.thumbnailPage >= totalPages - 1;
+  strip.scrollTop = scrollTop;
   const selected = [...state.selectedFrames].sort((a, b) => a - b);
   byId("frame-selection-summary").textContent = selected.length
     ? t("frames.selected_range", { count: selected.length, start: selected[0] + 1, end: selected.at(-1) + 1 })
@@ -646,27 +824,199 @@ function drawChart() {
   });
 }
 
-function renderTask() {
-  const task = state.task || {};
+function hdrSelectedSegment() {
+  const segmentId = state.hdrSelection?.segmentId;
+  return segments().find((segment) => String(segment.id) === String(segmentId)) || null;
+}
+
+function hdrSelectedFrames() {
+  const segment = hdrSelectedSegment();
+  if (!segment) return [];
+  return (state.hdrSelection?.frameIndices || []).map((index) => ({
+    index,
+    frame: segment.frames?.[index] || {},
+    segment
+  }));
+}
+
+function hdrMaximumGap(items) {
+  const timestamps = items
+    .map((item) => Date.parse(item.frame?.captured_at || ""))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  if (timestamps.length < 2) return null;
+  let maximum = 0;
+  for (let index = 1; index < timestamps.length; index += 1) {
+    maximum = Math.max(maximum, (timestamps[index] - timestamps[index - 1]) / 1000);
+  }
+  return maximum;
+}
+
+function renderHdr() {
+  const items = hdrSelectedFrames();
+  const segment = hdrSelectedSegment();
+  const list = byId("hdr-frame-list");
+  if (!list) return;
+  list.replaceChildren();
+  byId("hdr-source-count").textContent = `${items.length} / 9`;
+  const gap = hdrMaximumGap(items);
+  byId("hdr-source-summary").textContent = items.length
+    ? t("hdr.selection_summary", {
+        segment: segment?.name || t("segment.unnamed"),
+        count: items.length,
+        gap: gap == null ? t("hdr.gap_unknown") : formatDuration(gap)
+      })
+    : t("hdr.empty");
+
+  items.forEach(({ index, frame }) => {
+    const item = document.createElement("div");
+    item.className = "hdr-frame-item";
+    const image = document.createElement("img");
+    image.src = `/media/current/segments/${encodeURIComponent(segment.id)}/thumbnails/${String(index).padStart(6, "0")}.jpg`;
+    image.alt = frame.name || `#${index + 1}`;
+    image.loading = "lazy";
+    image.addEventListener("error", () => {
+      if (image.src.includes("/thumbnails/")) image.src = API.frameImage(segment.id, index);
+    }, { once: true });
+    const copy = document.createElement("span");
+    copy.className = "hdr-frame-copy";
+    const name = document.createElement("strong");
+    name.textContent = `#${index + 1} · ${frame.name || t("frames.index", { index: index + 1 })}`;
+    const exposure = document.createElement("span");
+    exposure.textContent = [
+      Number(frame.shutter) > 0 ? shutterValue(Number(frame.shutter)) : t("segment.shutter_unknown"),
+      frame.aperture ? `f/${compactNumber(frame.aperture, 1)}` : t("segment.aperture_unknown"),
+      frame.iso ? `ISO ${compactNumber(frame.iso, 0)}` : t("segment.iso_unknown")
+    ].join(" · ");
+    const captured = document.createElement("span");
+    captured.textContent = frame.captured_at || t("segment.time_unknown");
+    copy.append(name, exposure, captured);
+    item.append(image, copy);
+    list.append(item);
+  });
+
+  const preview = byId("hdr-preview");
+  preview.replaceChildren();
+  const result = state.hdrResult;
+  const hdrTaskStatus = state.task?.kind === "hdr" ? taskStatus() : null;
+  if (result?.preview_url) {
+    const image = document.createElement("img");
+    image.src = `${result.preview_url}?v=${encodeURIComponent(result.id || "latest")}`;
+    image.alt = result.output_name || t("hdr.title");
+    preview.append(image);
+    byId("hdr-preview-caption").textContent = t("hdr.completed", { name: result.output_name || "HDR" });
+  } else if (items.length) {
+    const middle = items[Math.floor(items.length / 2)];
+    const image = document.createElement("img");
+    image.src = API.frameImage(segment.id, middle.index);
+    image.alt = middle.frame.name || `#${middle.index + 1}`;
+    preview.append(image);
+    byId("hdr-preview-caption").textContent = t("hdr.preview_selected");
+  } else {
+    const empty = document.createElement("span");
+    empty.textContent = t("hdr.preview_empty");
+    preview.append(empty);
+    byId("hdr-preview-caption").textContent = hdrTaskStatus === "failed"
+      ? t("hdr.failed")
+      : hdrTaskStatus === "cancelled" ? t("hdr.cancelled") : t("hdr.preview_caption");
+  }
+
+  const hdrTaskActive = isTaskActive() && state.task?.kind === "hdr";
+  const status = byId("hdr-status");
+  const visibleStatus = hdrTaskStatus && hdrTaskStatus !== "completed"
+    ? hdrTaskStatus
+    : result ? "completed" : "idle";
+  status.dataset.status = visibleStatus;
+  status.textContent = statusLabel(visibleStatus);
+  byId("hdr-start-btn").disabled = isTaskActive() || items.length < 2 || items.length > 9;
+  byId("hdr-cancel-btn").disabled = !hdrTaskActive || taskStatus() === "cancelling";
+  byId("hdr-download-btn").disabled = !result?.download_url || isTaskActive();
+}
+
+function updateHdrModeFields() {
+  const radiance = byId("hdr-mode").value === "radiance";
+  byId("hdr-fusion-fields").hidden = radiance;
+  byId("hdr-radiance-fields").hidden = !radiance;
+  byId("hdr-mode-help").textContent = t(radiance ? "hdr.mode_radiance_help" : "hdr.mode_fusion_help");
+}
+
+function sendFramesToHdr() {
+  const segment = selectedSegment();
+  const frameIndices = [...state.selectedFrames].sort((left, right) => left - right);
+  if (!segment || frameIndices.length < 2 || frameIndices.length > 9) return;
+  state.hdrSelection = { segmentId: segment.id, frameIndices };
+  state.hdrResult = null;
+  switchView("hdr");
+  renderHdr();
+}
+
+async function startHdrMerge(event) {
+  event.preventDefault();
+  const items = hdrSelectedFrames();
+  const segment = hdrSelectedSegment();
+  if (!segment || items.length < 2 || items.length > 9) return;
+  const body = {
+    segment_id: segment.id,
+    frame_indices: items.map((item) => item.index),
+    mode: byId("hdr-mode").value,
+    align: byId("hdr-align").checked,
+    crop_edges: byId("hdr-crop").checked,
+    deghost_strength: Number(byId("hdr-deghost").value) / 100,
+    contrast_weight: Number(byId("hdr-contrast-weight").value),
+    saturation_weight: Number(byId("hdr-saturation-weight").value),
+    exposure_weight: Number(byId("hdr-exposure-weight").value),
+    gamma: Number(byId("hdr-gamma").value),
+    intensity: Number(byId("hdr-intensity").value),
+    light_adapt: Number(byId("hdr-light-adapt").value),
+    color_adapt: Number(byId("hdr-color-adapt").value),
+    post_contrast: Number(byId("hdr-post-contrast").value),
+    post_saturation: Number(byId("hdr-post-saturation").value),
+    output_format: byId("hdr-output-format").value
+  };
+  state.hdrResult = null;
+  await startOperation(API.hdr, body);
+  renderHdr();
+}
+
+function downloadHdrResult() {
+  if (state.hdrResult?.download_url) window.location.assign(state.hdrResult.download_url);
+}
+
+function taskProgress(task = {}) {
   const status = taskStatus(task);
   const completed = Number(task.completed ?? task.progress?.completed ?? 0);
   const total = Number(task.total ?? task.progress?.total ?? 0);
   const rawPercent = task.percent ?? task.progress_percent ?? (total ? completed / total * 100 : status === "completed" ? 100 : 0);
-  const percent = clamp(Math.round(Number(rawPercent) || 0), 0, 100);
-  const statusText = statusLabel(status);
-  byId("task-status").textContent = statusText;
-  byId("header-task-status").textContent = statusText;
+  return {
+    completed,
+    total,
+    percent: clamp(Math.round(Number(rawPercent) || 0), 0, 100)
+  };
+}
+
+function renderTask() {
+  const task = state.task || {};
+  const status = taskStatus(task);
+  const workflowTask = task.kind === "scan" ? { status: "idle" } : task;
+  const workflowStatus = taskStatus(workflowTask);
+  const { percent } = taskProgress(workflowTask);
+  byId("task-status").textContent = statusLabel(workflowStatus);
+  byId("header-task-status").textContent = statusLabel(status);
   byId("header-task-status").dataset.status = status;
-  byId("task-current").textContent = task.current_file || task.current_segment || task.detail?.current_file || task.message || t("task.waiting");
+  byId("task-current").textContent = workflowTask.current_file || workflowTask.current_segment || workflowTask.detail?.current_file || workflowTask.message || t("task.waiting");
   byId("task-percent").textContent = `${percent}%`;
   byId("task-progress").value = percent;
   byId("task-progress").textContent = `${percent}%`;
   byId("task-progress").setAttribute("aria-valuenow", String(percent));
+  if (state.scanDialogOpen && task.kind === "scan") updateScanDialog(task);
   if (state.exportDialogOpen && task.kind === "export") updateExportDialog(task);
+  if (state.archiveDialogOpen && task.kind === "archive") updateArchiveProgressDialog(task);
+  renderHdr();
 }
 
 function renderActionAvailability() {
   const busy = isTaskActive();
+  const renderTaskActive = busy && ["analyze", "render"].includes(state.task?.kind);
   const segment = selectedSegment();
   const renderedSegment = Boolean(segment)
     && ["rendered", "completed"].includes(segment.render_status || segment.status);
@@ -683,12 +1033,15 @@ function renderActionAvailability() {
   byId("bad-frame-btn").disabled = busy || !state.selectedFrames.size;
   byId("unmark-bad-frame-btn").disabled = busy || !state.selectedFrames.size;
   byId("frame-multi-select-btn").disabled = busy || !segment;
+  byId("deflicker-enabled").disabled = busy || !segment;
+  byId("hdr-send-btn").disabled = busy || !segment || state.selectedFrames.size < 2 || state.selectedFrames.size > 9;
   byId("process-current-btn").disabled = busy || !segment;
-  byId("cancel-btn").disabled = !busy || taskStatus() === "cancelling";
-  byId("export-btn").disabled = busy || !renderedSegment;
+  byId("cancel-btn").disabled = !renderTaskActive || taskStatus() === "cancelling";
+  byId("export-btn").disabled = busy || !renderedSegment || Boolean(segment?.export_artifact);
   byId("preview-video-btn").disabled = busy || !hasSegmentVideo(segment);
-  byId("archive-btn").disabled = busy || !renderedSegment || !segment?.export_artifact;
+  byId("archive-btn").disabled = busy || !renderedSegment || !segment?.export_artifact || Boolean(segment?.archive_artifact);
   byId("clear-logs-btn").disabled = busy || !state.logs.length;
+  byId("delete-all-history-btn").disabled = busy || !state.history.length;
   document.querySelectorAll(".recipe-panel input, .recipe-panel select, .recipe-panel button").forEach((control) => { control.disabled = busy || !segment; });
 }
 
@@ -734,7 +1087,8 @@ function switchView(viewName) {
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
   });
-  if (viewName === "history") Promise.all([loadHistory(), loadLogs()]);
+  if (viewName === "history") Promise.all([loadHistory(), loadLogs(), loadSettings()]);
+  if (viewName === "hdr") renderHdr();
   if (viewName === "recipes") loadColorPresets();
   if (viewName === "settings") loadSettings();
 }
@@ -823,11 +1177,12 @@ async function openDirectoryBrowser(relative = "") {
   }
 }
 
-function chooseBrowsedDirectory() {
+async function chooseBrowsedDirectory() {
   state.pendingSourcePath = containerSourcePath(state.directoryBrowserPath);
   byId("directory-browser-dialog").close();
   renderSource();
   renderActionAvailability();
+  await scanSource();
 }
 
 async function pickDirectory() {
@@ -842,12 +1197,23 @@ async function pickDirectory() {
     state.pendingSourcePath = result.path;
     renderSource();
     renderActionAvailability();
+    await scanSource();
   } catch (error) { showError(error); }
 }
 
 async function scanSource() {
   if (!state.pendingSourcePath) return;
-  await startOperation(API.scan, { source_dir: state.pendingSourcePath });
+  openScanDialog();
+  try {
+    await startOperation(
+      API.scan,
+      { source_dir: state.pendingSourcePath },
+      { showError: false }
+    );
+    updateScanDialog(state.task);
+  } catch (error) {
+    updateScanDialog({ kind: "scan", status: "failed", error: error.message });
+  }
 }
 
 async function startOperation(path, body = {}, options = {}) {
@@ -858,7 +1224,72 @@ async function startOperation(path, body = {}, options = {}) {
     renderTask();
     renderActionAvailability();
     updateTaskPolling();
-  } catch (error) { showError(error); }
+  } catch (error) {
+    if (options.showError === false) throw error;
+    showError(error);
+  }
+}
+
+function openScanDialog() {
+  const dialog = byId("scan-progress-dialog");
+  state.scanDialogOpen = true;
+  byId("scan-progress-title").textContent = t("dialog.scan_progress.title");
+  byId("scan-progress-message").textContent = t("dialog.scan_progress.preparing");
+  byId("scan-progress").value = 0;
+  byId("scan-progress").textContent = "0%";
+  byId("scan-progress").setAttribute("aria-valuenow", "0");
+  byId("scan-progress-percent").textContent = "0%";
+  byId("scan-progress-cancel-btn").hidden = false;
+  byId("scan-progress-cancel-btn").disabled = false;
+  byId("scan-progress-close-btn").hidden = true;
+  if (!dialog.open) dialog.showModal();
+}
+
+function updateScanDialog(task) {
+  if (!state.scanDialogOpen) return;
+  const status = taskStatus(task);
+  const { percent } = taskProgress(task);
+  const progress = byId("scan-progress");
+  const cancelButton = byId("scan-progress-cancel-btn");
+  const closeButton = byId("scan-progress-close-btn");
+  progress.value = percent;
+  progress.textContent = `${percent}%`;
+  progress.setAttribute("aria-valuenow", String(percent));
+  byId("scan-progress-percent").textContent = `${percent}%`;
+
+  if (ACTIVE_TASK_STATES.has(status)) {
+    byId("scan-progress-title").textContent = status === "cancelling"
+      ? t("dialog.scan_progress.cancelling")
+      : t("dialog.scan_progress.title");
+    byId("scan-progress-message").textContent = status === "cancelling"
+      ? t("dialog.scan_progress.cancelling_body")
+      : task.detail?.current_file || task.current_file || t("dialog.scan_progress.preparing");
+    cancelButton.hidden = false;
+    cancelButton.disabled = status === "cancelling";
+    closeButton.hidden = true;
+    return;
+  }
+
+  cancelButton.hidden = true;
+  closeButton.hidden = false;
+  if (status === "completed") {
+    byId("scan-progress-title").textContent = t("dialog.scan_progress.completed");
+    byId("scan-progress-message").textContent = t("dialog.scan_progress.completed_body", {
+      count: Number(task.result?.segments || 0)
+    });
+  } else if (status === "cancelled") {
+    byId("scan-progress-title").textContent = t("dialog.scan_progress.cancelled");
+    byId("scan-progress-message").textContent = t("dialog.scan_progress.cancelled_body");
+  } else {
+    byId("scan-progress-title").textContent = t("dialog.scan_progress.failed");
+    byId("scan-progress-message").textContent = task.error || t("error.unknown");
+  }
+}
+
+function closeScanDialog() {
+  state.scanDialogOpen = false;
+  const dialog = byId("scan-progress-dialog");
+  if (dialog.open) dialog.close();
 }
 
 async function selectSegment(segmentId) {
@@ -883,62 +1314,84 @@ function openExportDialog() {
   byId("export-progress-title").textContent = t("dialog.export_progress.title");
   byId("export-progress-message").textContent = t("dialog.export_progress.preparing");
   byId("export-progress").value = 0;
+  byId("export-progress").textContent = "0%";
   byId("export-progress").setAttribute("aria-valuenow", "0");
+  byId("export-progress-percent").textContent = "0%";
+  byId("export-progress-stats").textContent = t("dialog.export_progress.stats_preparing");
   byId("export-progress-cancel-btn").hidden = false;
   byId("export-progress-cancel-btn").disabled = false;
   byId("export-progress-close-btn").hidden = true;
-  byId("export-progress-preview-btn").hidden = true;
   if (!dialog.open) dialog.showModal();
+}
+
+function formatExportEta(value) {
+  const seconds = Math.max(0, Math.round(Number(value)));
+  if (!Number.isFinite(seconds)) return t("dialog.export_progress.eta_calculating");
+  if (seconds < 60) return t("dialog.export_progress.eta_seconds", { seconds });
+  return t("dialog.export_progress.eta_minutes", {
+    minutes: Math.floor(seconds / 60),
+    seconds: seconds % 60
+  });
 }
 
 function updateExportDialog(task) {
   if (!state.exportDialogOpen) return;
   const status = taskStatus(task);
-  const completed = Number(task.completed ?? task.progress?.completed ?? 0);
-  const total = Number(task.total ?? task.progress?.total ?? 0);
-  const rawPercent = task.percent ?? task.progress_percent ?? (total ? completed / total * 100 : status === "completed" ? 100 : 0);
-  const percent = clamp(Math.round(Number(rawPercent) || 0), 0, 100);
+  const { completed, total, percent } = taskProgress(task);
+  const detail = task.detail || {};
   const progress = byId("export-progress");
   const cancelButton = byId("export-progress-cancel-btn");
   const closeButton = byId("export-progress-close-btn");
-  const previewButton = byId("export-progress-preview-btn");
   progress.value = percent;
   progress.textContent = `${percent}%`;
   progress.setAttribute("aria-valuenow", String(percent));
+  byId("export-progress-percent").textContent = `${percent}%`;
 
   if (ACTIVE_TASK_STATES.has(status)) {
     byId("export-progress-title").textContent = status === "cancelling"
       ? t("dialog.export_progress.cancelling")
       : t("dialog.export_progress.title");
-    byId("export-progress-message").textContent = task.current_file
+    byId("export-progress-message").textContent = detail.current_segment
+      || detail.current_file
       || task.current_segment
-      || task.message
-      || t("dialog.export_progress.running", { percent });
+      || task.current_file
+      || t("dialog.export_progress.preparing");
+    const encoded = Number(detail.encoded_frames ?? completed);
+    const segmentTotal = Number(detail.segment_total ?? total);
+    byId("export-progress-stats").textContent = detail.encoder
+      ? t("dialog.export_progress.stats", {
+        done: encoded,
+        total: segmentTotal,
+        encoder: detail.encoder,
+        fps: Number(detail.fps || 0).toFixed(1),
+        eta: formatExportEta(detail.eta_seconds)
+      })
+      : t("dialog.export_progress.stats_preparing");
     cancelButton.hidden = false;
     cancelButton.disabled = status === "cancelling";
     closeButton.hidden = true;
-    previewButton.hidden = true;
     return;
   }
 
   cancelButton.hidden = true;
   closeButton.hidden = false;
   if (status === "completed") {
+    progress.value = 100;
+    progress.textContent = "100%";
+    progress.setAttribute("aria-valuenow", "100");
+    byId("export-progress-percent").textContent = "100%";
     const result = task.result || {};
     byId("export-progress-title").textContent = t("dialog.export_done.title");
     byId("export-progress-message").textContent = t("dialog.export_done.body", {
       path: result.output_dir || "-",
       files: Array.isArray(result.outputs) && result.outputs.length ? result.outputs.join(", ") : "-"
     });
-    previewButton.hidden = !selectedSegment()?.export_artifact;
   } else if (status === "cancelled") {
     byId("export-progress-title").textContent = t("dialog.export_progress.cancelled");
     byId("export-progress-message").textContent = t("dialog.export_progress.cancelled_body");
-    previewButton.hidden = true;
   } else {
     byId("export-progress-title").textContent = t("dialog.export_progress.failed");
     byId("export-progress-message").textContent = task.error || t("error.unknown");
-    previewButton.hidden = true;
   }
 }
 
@@ -956,29 +1409,27 @@ function previewCurrentVideo() {
   state.selectionAnchor = null;
   renderFrameStrip();
   renderSegmentDetail();
+  renderHdr();
   byId("segment-preview").querySelector("video")?.focus();
 }
 
 function showTaskCompletion(completedTask) {
+  if (completedTask.kind === "scan") {
+    updateScanDialog(completedTask);
+    return;
+  }
   if (completedTask.kind === "export") {
     updateExportDialog(completedTask);
     return;
   }
-  if (taskStatus(completedTask) !== "completed") return;
-  const result = completedTask.result || {};
-  const dialog = byId("operation-result-dialog");
-  const title = byId("operation-result-title");
-  const message = byId("operation-result-message");
-  const historyButton = byId("result-history-btn");
-  historyButton.hidden = true;
   if (completedTask.kind === "archive") {
-    title.textContent = t("dialog.archive_done.title");
-    message.textContent = t("dialog.archive_done.body", { path: result.archive_dir || "-" });
-    historyButton.hidden = false;
-  } else {
+    updateArchiveProgressDialog(completedTask);
     return;
   }
-  dialog.showModal();
+  if (completedTask.kind === "hdr") {
+    if (completedTask.status === "completed" && completedTask.result) state.hdrResult = completedTask.result;
+    renderHdr();
+  }
 }
 
 async function toggleSegmentSelection(segmentId) {
@@ -1102,6 +1553,8 @@ async function mergeSelectedSegments() {
     state.selectedSegmentId = selectedId;
     state.selectedSegmentIds.clear();
     state.segmentMultiSelect = false;
+    state.hdrSelection = null;
+    state.hdrResult = null;
     await refreshState();
   } catch (error) {
     showError(error);
@@ -1172,20 +1625,41 @@ async function processCurrentSegment(fromStage, path) {
     const segmentIds = currentSegmentIdsForAction();
     if (!segmentIds.length) return;
     await startOperation(path, { segment_ids: segmentIds, from_stage: fromStage });
-  } catch (error) { showError(error); }
+  } catch (error) {
+    showError(error);
+  }
 }
 
 async function exportVideo() {
   const segmentIds = currentSegmentIdsForAction();
   if (!segmentIds.length) return;
   openExportDialog();
+  const segment = selectedSegment();
+  const representative = segment?.frames?.find((frame) => Number(frame?.width) && Number(frame?.height));
+  const resolution = byId("export-resolution").value;
+  const codec = byId("export-codec").value;
+  if (
+    resolution === "original"
+    && codec === "h264"
+    && Math.max(Number(representative?.width || 0), Number(representative?.height || 0)) > 4096
+  ) {
+    updateExportDialog({
+      kind: "export",
+      status: "failed",
+      error: t("dialog.export_progress.h264_oversize", {
+        width: representative.width,
+        height: representative.height
+      })
+    });
+    return;
+  }
   try {
     await flushRecipeSave();
     await startOperation(API.export, {
       segment_ids: segmentIds,
       fps: Number(byId("export-fps").value),
-      resolution: byId("export-resolution").value,
-      codec: byId("export-codec").value,
+      resolution,
+      codec,
       crf: Number(byId("export-crf").value)
     }, { showError: false });
   } catch (error) {
@@ -1202,16 +1676,96 @@ function openArchiveDialog() {
   byId("archive-dialog").showModal();
 }
 
+function openArchiveProgressDialog() {
+  const dialog = byId("archive-progress-dialog");
+  state.archiveDialogOpen = true;
+  byId("archive-progress-title").textContent = t("dialog.archive_progress.title");
+  byId("archive-progress-message").textContent = t("dialog.archive_progress.preparing");
+  byId("archive-spinner").hidden = false;
+  byId("archive-spinner-label").textContent = t("dialog.archive_progress.waiting");
+  byId("archive-progress-cancel-btn").hidden = false;
+  byId("archive-progress-cancel-btn").disabled = false;
+  byId("archive-progress-close-btn").hidden = true;
+  byId("archive-progress-history-btn").hidden = true;
+  if (!dialog.open) dialog.showModal();
+}
+
+function updateArchiveProgressDialog(task) {
+  if (!state.archiveDialogOpen) return;
+  const status = taskStatus(task);
+  const spinner = byId("archive-spinner");
+  const cancelButton = byId("archive-progress-cancel-btn");
+  const closeButton = byId("archive-progress-close-btn");
+  const historyButton = byId("archive-progress-history-btn");
+
+  if (ACTIVE_TASK_STATES.has(status)) {
+    byId("archive-progress-title").textContent = status === "cancelling"
+      ? t("dialog.archive_progress.cancelling")
+      : t("dialog.archive_progress.title");
+    byId("archive-progress-message").textContent = t("dialog.archive_progress.preparing");
+    byId("archive-spinner-label").textContent = status === "cancelling"
+      ? t("dialog.archive_progress.cancelling_waiting")
+      : t("dialog.archive_progress.waiting");
+    spinner.hidden = false;
+    cancelButton.hidden = false;
+    cancelButton.disabled = status === "cancelling";
+    closeButton.hidden = true;
+    historyButton.hidden = true;
+    return;
+  }
+
+  spinner.hidden = true;
+  cancelButton.hidden = true;
+  closeButton.hidden = false;
+  historyButton.hidden = true;
+  if (status === "completed") {
+    const result = task.result || {};
+    byId("archive-progress-title").textContent = t("dialog.archive_done.title");
+    byId("archive-progress-message").textContent = t("dialog.archive_done.body", {
+      path: result.archive_dir || "-"
+    });
+    historyButton.hidden = false;
+  } else if (status === "cancelled") {
+    byId("archive-progress-title").textContent = t("dialog.archive_progress.cancelled");
+    byId("archive-progress-message").textContent = t("dialog.archive_progress.cancelled_body");
+  } else {
+    byId("archive-progress-title").textContent = t("dialog.archive_progress.failed");
+    byId("archive-progress-message").textContent = task.error || t("error.unknown");
+  }
+}
+
+function closeArchiveProgressDialog() {
+  state.archiveDialogOpen = false;
+  const dialog = byId("archive-progress-dialog");
+  if (dialog.open) dialog.close();
+}
+
+async function openClearProjectDialog() {
+  try {
+    const payload = await api(API.settings);
+    const targets = payload.cleanup_targets || {};
+    byId("clear-workspace-path").textContent = targets.workspace_current || "workspace/current";
+    byId("clear-output-path").textContent = targets.output_dir || "output";
+    byId("clear-archive-path").textContent = targets.archive_dir || "archive";
+    byId("clear-project-dialog").showModal();
+  } catch (error) {
+    showError(error);
+  }
+}
+
 async function archiveProject() {
   byId("archive-dialog").close();
+  openArchiveProgressDialog();
   try {
     await flushRecipeSave();
     await startOperation(API.archive, {
       confirm_archive: true,
       preserve_source: true,
       segment_ids: currentSegmentIdsForAction()
-    });
-  } catch (error) { showError(error); }
+    }, { showError: false });
+  } catch (error) {
+    updateArchiveProgressDialog({ kind: "archive", status: "failed", error: error.message });
+  }
 }
 
 async function clearProject() {
@@ -1219,11 +1773,13 @@ async function clearProject() {
   try {
     await api(API.project, { method: "DELETE", body: { confirm: true } });
     state.project = null;
+    state.task = { status: "idle", completed: 0, total: 0, detail: {}, logs: [] };
     state.selectedSegmentId = null;
     state.pendingSourcePath = "";
     state.thumbnails = [];
     state.thumbnailTotal = 0;
     state.selectedSegmentIds.clear();
+    state.selectedFrames.clear();
     state.segmentMultiSelect = false;
     renderAll();
     renderFrameStrip();
@@ -1296,7 +1852,6 @@ function normaliseHistoryMedia(summary, manifest) {
   return {
     ...summary,
     ...manifest,
-    previews: mergeMediaItems(summary.previews || summary.preview_videos, manifest.previews || manifest.preview_videos),
     outputs: mergeMediaItems(summary.outputs || summary.final_videos, manifest.outputs || manifest.final_videos)
   };
 }
@@ -1335,18 +1890,37 @@ function renderHistory() {
     identity.append(title, source);
     const summary = document.createElement("div");
     const counts = document.createElement("div");
-    counts.textContent = t("history.counts", { segments: entry.segment_count ?? entry.segments?.length ?? 0, jpegs: historyJpegCount(entry) });
+    counts.textContent = t("history.counts", { segments: entry.segment_count ?? entry.segments?.length ?? 0, originals: historyOriginalCount(entry) });
+    const fileRanges = historyFileRanges(entry);
+    const fileRange = document.createElement("div");
+    fileRange.className = "file-range-summary";
+    fileRange.textContent = t("history.file_range", {
+      value: fileRanges.join(preferences.language === "zh-CN" ? "；" : "; ")
+    });
+    fileRange.hidden = !fileRanges.length;
     const recipes = document.createElement("div");
     recipes.className = "recipe-summary";
     recipes.textContent = t("history.recipe", { value: recipeSummary(entry) });
-    summary.append(counts, recipes);
+    const capture = document.createElement("div");
+    capture.className = "capture-summary";
+    historyCaptureSummary(entry).forEach((line) => {
+      const row = document.createElement("span");
+      row.textContent = line;
+      capture.append(row);
+    });
+    summary.append(counts, fileRange, recipes, capture);
     const media = document.createElement("div");
     media.className = "media-links";
-    appendMediaLinks(media, t("history.preview"), entry.previews || entry.preview_videos || []);
     appendMediaLinks(media, t("history.output"), entry.outputs || entry.final_videos || []);
-    article.append(identity, summary, media);
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "history-delete-button";
+    deleteButton.textContent = t("history.delete");
+    deleteButton.addEventListener("click", () => deleteHistoryEntry(entry.timestamp || entry.archive_id || entry.id));
+    article.append(identity, summary, media, deleteButton);
     list.append(article);
   });
+  renderActionAvailability();
 }
 
 function historySortValue(entry) {
@@ -1356,12 +1930,55 @@ function historySortValue(entry) {
   return Number(raw.replace(/\D/g, "").slice(0, 14)) || 0;
 }
 
-function historyJpegCount(entry) {
+function historyOriginalCount(entry) {
   const segmentCounts = (entry.segments || [])
-    .map((segment) => Number(segment.jpeg_count))
+    .map((segment) => Number(segment.source_file_count))
     .filter(Number.isFinite);
   if (segmentCounts.length) return segmentCounts.reduce((total, count) => total + count, 0);
-  return Number(entry.jpeg_count ?? entry.frame_count ?? 0) || 0;
+  return Number(entry.source_file_count ?? entry.frame_count ?? entry.jpeg_count ?? 0) || 0;
+}
+
+function historyFileRanges(entry) {
+  const segments = Array.isArray(entry.segments) ? entry.segments : [];
+  return segments.flatMap((segment) => {
+    const originals = Array.isArray(segment.originals) ? segment.originals : [];
+    const filename = (value) => String(value || "").replace(/\\/g, "/").split("/").at(-1);
+    const first = segment.first_file || filename(originals[0]);
+    const last = segment.last_file || filename(originals.at(-1));
+    if (!first || !last) return [];
+    const range = `[${first} - ${last}]`;
+    return segments.length > 1 && segment.name ? [`${segment.name} ${range}`] : [range];
+  });
+}
+
+function historyCaptureSummary(entry) {
+  const metadata = (entry.segments || []).map(segmentCaptureMetadata);
+  const unique = (key, fallback) => {
+    const values = [...new Set(metadata.map((item) => item[key]).filter(Boolean))];
+    return values.length ? values.join(preferences.language === "zh-CN" ? "、" : ", ") : fallback;
+  };
+  return [
+    t("history.focal", { value: unique("focal", t("segment.focal_unknown")) }),
+    t("history.capture_date", { value: unique("date", t("segment.date_unknown")) }),
+    t("history.capture_time", { value: unique("time", t("segment.time_unknown")) }),
+    t("history.location", { value: unique("location", t("segment.location_unknown")) })
+  ];
+}
+
+async function deleteHistoryEntry(timestamp) {
+  if (!timestamp || !window.confirm(t("history.delete_confirm", { timestamp }))) return;
+  try {
+    await api(API.historyItem(timestamp), { method: "DELETE", body: { confirm_delete: true } });
+    await Promise.all([refreshState(), loadHistory(), loadLogs()]);
+  } catch (error) { showError(error); }
+}
+
+async function deleteAllHistory() {
+  if (!state.history.length || !window.confirm(t("history.delete_all_confirm", { count: state.history.length }))) return;
+  try {
+    await api(API.history, { method: "DELETE", body: { confirm_delete: true } });
+    await Promise.all([refreshState(), loadHistory(), loadLogs()]);
+  } catch (error) { showError(error); }
 }
 
 function recipeSummary(entry) {
@@ -1377,6 +1994,16 @@ function recipeSummary(entry) {
   return [...new Set(labels)].join(preferences.language === "zh-CN" ? "、" : ", ") || t("history.record_unavailable");
 }
 
+function potPlayerUrl(value) {
+  try {
+    const mediaUrl = new URL(value, window.location.href);
+    if (mediaUrl.origin !== window.location.origin) return value;
+    return `potplayer://${mediaUrl.href}`;
+  } catch (_error) {
+    return value;
+  }
+}
+
 function appendMediaLinks(container, label, items) {
   const values = Array.isArray(items) ? items : [items].filter(Boolean);
   if (!values.length) {
@@ -1388,9 +2015,8 @@ function appendMediaLinks(container, label, items) {
   }
   values.forEach((item, index) => {
     const link = document.createElement("a");
-    link.href = typeof item === "string" ? item : item.url;
-    link.target = "_blank";
-    link.rel = "noopener";
+    link.className = "history-media-link";
+    link.href = potPlayerUrl(typeof item === "string" ? item : item.url);
     link.textContent = `${label}${values.length > 1 ? ` ${index + 1}` : ""}`;
     container.append(link);
   });
@@ -1520,17 +2146,35 @@ async function loadSettings() {
   } catch (error) { showError(error); }
 }
 
+async function saveLogLevel() {
+  const status = byId("settings-log-level-status");
+  status.textContent = "";
+  try {
+    const payload = await api(API.settings, {
+      method: "PUT",
+      body: { logging: { level: byId("settings-log-level").value } }
+    });
+    state.settings = payload.settings || payload.config || state.settings;
+    setSettingsForm(state.settings);
+    status.textContent = t("settings.saved");
+    await loadLogs();
+  } catch (error) { showError(error); }
+}
+
 function setSettingsForm(settings) {
   populateColorPresetSelects();
   byId("settings-workspace-dir").value = settings.workspace_dir || "";
   byId("settings-output-dir").value = settings.output_dir || "";
   byId("settings-archive-dir").value = settings.archive_dir || "";
   byId("settings-default-recipe").value = settings.processing?.default_recipe || "natural";
+  byId("settings-render-device").value = settings.processing?.render_device || "auto";
   byId("settings-gap-seconds").value = settings.scan?.gap_seconds ?? 120;
   byId("settings-log-level").value = settings.logging?.level || "INFO";
   byId("settings-preview-fps").value = settings.preview?.fps ?? 30;
   byId("settings-preview-width").value = settings.preview?.width ?? 1920;
-  byId("settings-export-resolution").value = settings.export?.resolution || "4k";
+  byId("settings-export-resolution").value = settings.export?.resolution === "source"
+    ? "original"
+    : settings.export?.resolution || "4k";
   byId("settings-export-codec").value = settings.export?.codec || "h264";
   byId("settings-export-crf").value = settings.export?.crf ?? 18;
 }
@@ -1542,9 +2186,11 @@ async function saveSettings(event) {
     workspace_dir: byId("settings-workspace-dir").value,
     output_dir: byId("settings-output-dir").value,
     archive_dir: byId("settings-archive-dir").value,
-    processing: { default_recipe: byId("settings-default-recipe").value },
+    processing: {
+      default_recipe: byId("settings-default-recipe").value,
+      render_device: byId("settings-render-device").value,
+    },
     scan: { gap_seconds: Number(byId("settings-gap-seconds").value) },
-    logging: { level: byId("settings-log-level").value },
     preview: { fps: Number(byId("settings-preview-fps").value), width: Number(byId("settings-preview-width").value) },
     export: { resolution: byId("settings-export-resolution").value, codec: byId("settings-export-codec").value, crf: Number(byId("settings-export-crf").value) }
   };
@@ -1565,13 +2211,32 @@ async function pickSettingsDirectory(purpose) {
   } catch (error) { showError(error); }
 }
 
+function toggleHistoryRegion(toggleId, contentId) {
+  const toggle = byId(toggleId);
+  const content = byId(contentId);
+  const collapsing = toggle.getAttribute("aria-expanded") === "true";
+  toggle.setAttribute("aria-expanded", String(!collapsing));
+  content.hidden = collapsing;
+  toggle.closest(".history-region, .logs-region")?.classList.toggle("is-collapsed", collapsing);
+}
+
+function bindHistoryRegionToggle(headingId, toggleId, contentId) {
+  const heading = byId(headingId);
+  const toggle = byId(toggleId);
+  heading.addEventListener("click", (event) => {
+    const interactive = event.target.closest("button, select, input, label, a");
+    if (interactive && interactive !== toggle) return;
+    toggleHistoryRegion(toggleId, contentId);
+  });
+}
+
 function bindEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
   byId("app").querySelector('[role="tablist"]').addEventListener("keydown", handleTabKeydown);
   byId("dismiss-error-btn").addEventListener("click", clearError);
   byId("pick-source-btn").addEventListener("click", pickDirectory);
   byId("scan-btn").addEventListener("click", scanSource);
-  byId("clear-project-btn").addEventListener("click", () => byId("clear-project-dialog").showModal());
+  byId("clear-project-btn").addEventListener("click", openClearProjectDialog);
   byId("clear-confirm-btn").addEventListener("click", clearProject);
   byId("segment-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-segment-id]");
@@ -1591,9 +2256,13 @@ function bindEvents() {
     const button = event.target.closest("[data-frame-index]");
     if (button) selectFrame(Number(button.dataset.frameIndex), event.shiftKey);
   });
+  byId("preview-caption").addEventListener("click", (event) => {
+    const button = event.target.closest("#preview-exif-btn");
+    if (button) openExifDialog(Number(button.dataset.frameIndex));
+  });
+  byId("exif-dialog-close").addEventListener("click", () => byId("exif-dialog").close());
+  byId("exif-dialog-ok").addEventListener("click", () => byId("exif-dialog").close());
   byId("frame-multi-select-btn").addEventListener("click", toggleFrameMultiSelect);
-  byId("frame-page-prev").addEventListener("click", () => loadThumbnailPage(state.thumbnailPage - 1));
-  byId("frame-page-next").addEventListener("click", () => loadThumbnailPage(state.thumbnailPage + 1));
   byId("chart-type-select").addEventListener("change", drawChart);
   byId("chart-type-select").addEventListener("click", (event) => event.stopPropagation());
   document.querySelector(".frame-summary").addEventListener("click", (event) => {
@@ -1604,24 +2273,36 @@ function bindEvents() {
   });
   byId("bad-frame-btn").addEventListener("click", () => updateRejected(true));
   byId("unmark-bad-frame-btn").addEventListener("click", () => updateRejected(false));
+  byId("hdr-send-btn").addEventListener("click", sendFramesToHdr);
+  byId("hdr-form").addEventListener("submit", startHdrMerge);
+  byId("hdr-mode").addEventListener("change", updateHdrModeFields);
+  byId("hdr-deghost").addEventListener("input", () => {
+    byId("hdr-deghost-value").textContent = `${byId("hdr-deghost").value}%`;
+  });
+  byId("hdr-cancel-btn").addEventListener("click", cancelTask);
+  byId("hdr-download-btn").addEventListener("click", downloadHdrResult);
   byId("process-current-btn").addEventListener("click", () => processCurrentSegment("analyze", API.process));
   byId("cancel-btn").addEventListener("click", cancelTask);
   byId("export-btn").addEventListener("click", exportVideo);
   byId("preview-video-btn").addEventListener("click", previewCurrentVideo);
   byId("archive-btn").addEventListener("click", openArchiveDialog);
   byId("archive-confirm-btn").addEventListener("click", archiveProject);
+  byId("scan-progress-cancel-btn").addEventListener("click", cancelTask);
+  byId("scan-progress-close-btn").addEventListener("click", closeScanDialog);
   byId("export-progress-cancel-btn").addEventListener("click", cancelTask);
   byId("export-progress-close-btn").addEventListener("click", closeExportDialog);
-  byId("export-progress-preview-btn").addEventListener("click", () => {
-    closeExportDialog();
-    previewCurrentVideo();
-  });
-  byId("result-history-btn").addEventListener("click", () => {
-    byId("operation-result-dialog").close();
+  byId("archive-progress-cancel-btn").addEventListener("click", cancelTask);
+  byId("archive-progress-close-btn").addEventListener("click", closeArchiveProgressDialog);
+  byId("archive-progress-history-btn").addEventListener("click", () => {
+    closeArchiveProgressDialog();
     switchView("history");
   });
   byId("refresh-history-btn").addEventListener("click", loadHistory);
+  bindHistoryRegionToggle("archive-history-bar", "archive-history-toggle", "history-list");
+  bindHistoryRegionToggle("task-log-bar", "task-log-toggle", "task-log-content");
+  byId("delete-all-history-btn").addEventListener("click", deleteAllHistory);
   byId("clear-logs-btn").addEventListener("click", clearLogs);
+  byId("settings-log-level").addEventListener("change", saveLogLevel);
   byId("color-preset-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-color-preset-id]");
     if (button) selectColorPreset(button.dataset.colorPresetId);
@@ -1656,6 +2337,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   try { await Promise.all([loadCapabilities(), loadColorPresets()]); } catch (error) { showError(error); }
   renderFrameStrip();
+  updateHdrModeFields();
+  renderHdr();
   drawChart();
   refreshState();
 });

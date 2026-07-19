@@ -60,6 +60,33 @@ class ProjectStoreTests(unittest.TestCase):
 
         self.assertEqual(self.store.load()["status"], "created")
 
+    def test_external_analysis_file_keeps_project_state_small_and_migrates_legacy(self):
+        state = self.store.create(self.source_dir)
+        state["segments"] = [{"id": "seg-1", "analysis": {"gain": [1.0, 1.1]}}]
+
+        saved_without_external_file = self.store.save(state)
+        self.assertEqual(
+            saved_without_external_file["segments"][0]["analysis"],
+            {"gain": [1.0, 1.1]},
+        )
+
+        analysis_dir = self.store.current_dir / "segments" / "seg-1"
+        analysis_dir.mkdir(parents=True)
+        (analysis_dir / "analysis.json").write_text(
+            json.dumps({"gain": [1.0, 1.1]}), encoding="utf-8"
+        )
+
+        saved = self.store.save(state)
+        self.assertIsNone(saved["segments"][0]["analysis"])
+
+        self.store.project_path.write_text(
+            json.dumps(state), encoding="utf-8"
+        )
+        loaded = self.store.load()
+        self.assertIsNone(loaded["segments"][0]["analysis"])
+        persisted = json.loads(self.store.project_path.read_text(encoding="utf-8"))
+        self.assertIsNone(persisted["segments"][0]["analysis"])
+
     def test_update_requires_existing_project(self):
         with self.assertRaisesRegex(RuntimeError, "No active project"):
             self.store.update(lambda state: state)

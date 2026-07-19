@@ -17,8 +17,11 @@ export:
   resolution: 4k
   codec: h264
   crf: 18
+  hardware_acceleration: auto
 processing:
   jpeg_quality: 95
+  render_workers: 0
+  render_device: auto
   default_recipe: natural
   color_presets:
     natural:

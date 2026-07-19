@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import traceback
@@ -25,7 +26,7 @@ from werkzeug.exceptions import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import archive, config_io, image_ops, image_pipeline, media_catalog, video_export
+from src import archive, config_io, hdr_merge, image_ops, image_pipeline, media_catalog, video_export
 from src.instance_guard import InstanceAlreadyRunning, InstanceGuard
 from src.project_store import ProjectStore
 from src.runtime_env import (
@@ -58,6 +59,18 @@ class ApiError(RuntimeError):
 
 def _error(message: str, code: str, status: int):
     return jsonify({"error": message, "code": code}), status
+
+
+def _clear_directory_contents(directory: Path) -> None:
+    directory = Path(directory).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    for child in directory.iterdir():
+        if child.name == ".gitkeep":
+            continue
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
 
 
 def _safe_media_path(root: Path, relative: str, suffixes: set[str], allowed: Callable[[Path], bool]) -> Path | None:
@@ -145,6 +158,8 @@ def _current_media_allowed(current_root: Path, candidate: Path) -> bool:
         len(parts) >= 2 and parts[0] == "previews"
     ) or (
         len(parts) >= 4 and parts[0] == "segments" and parts[2] in {"thumbnails", "result"}
+    ) or (
+        len(parts) == 3 and parts[0] == "hdr" and parts[2] == "preview.jpg"
     )
 
 
@@ -318,6 +333,8 @@ def _recipe_for_pipeline(recipe: Any, settings: dict) -> dict:
     gain_limit = deflicker.get("gain_limit")
     pipeline_recipe = {
         "jpeg_quality": int(settings["processing"].get("jpeg_quality", 95)),
+        "render_workers": int(settings["processing"].get("render_workers", 0)),
+        "render_device": str(settings["processing"].get("render_device", "auto")),
         "deflicker": {
             "enable": bool(deflicker.get("enabled", deflicker.get("enable", True))),
             "window": int(deflicker.get("window", 11)),
@@ -461,6 +478,36 @@ def create_app(overrides: dict | None = None) -> Flask:
             raise ApiError("当前没有项目", "project_missing", 400)
         return project
 
+    def frame_source_path(project: dict, segment: dict, frame_index: int) -> Path:
+        frames = segment.get("frames", [])
+        if frame_index < 0 or frame_index >= len(frames):
+            raise ApiError("帧不存在", "not_found", 404)
+        frame = frames[frame_index]
+        source_value = frame.get("path") if isinstance(frame, dict) else frame
+        if not isinstance(source_value, str):
+            raise ApiError("帧不存在", "not_found", 404)
+        try:
+            source_root = Path(project["source_dir"]).resolve(strict=True)
+            source_path = Path(source_value).resolve(strict=True)
+            source_path.relative_to(source_root)
+        except (KeyError, OSError, ValueError):
+            raise ApiError("帧不存在", "not_found", 404) from None
+        registered = {
+            str(Path(item.get("path") if isinstance(item, dict) else item).resolve()).casefold()
+            for item in frames
+            if isinstance(item, (dict, str))
+            and isinstance(item.get("path") if isinstance(item, dict) else item, str)
+        }
+        if str(source_path).casefold() not in registered or not source_path.is_file():
+            raise ApiError("帧不存在", "not_found", 404)
+        return source_path
+
+    def hdr_result_by_id(project: dict, result_id: str) -> dict:
+        for result in project.get("hdr_results", []):
+            if isinstance(result, dict) and result.get("id") == result_id:
+                return result
+        raise ApiError("HDR 成果不存在", "not_found", 404)
+
     def submit(
         kind: str,
         work: Callable[[TaskContext], Any],
@@ -554,7 +601,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         return jsonify({
             "project": store.load(),
             "task": _task_response(tasks.snapshot()),
-            "capabilities": {"raw": True, "export": ["h264", "h265"]},
+            "capabilities": {"raw": True, "hdr": True, "export": ["h264", "h265"]},
         })
 
     @app.get("/api/capabilities")
@@ -693,13 +740,31 @@ def create_app(overrides: dict | None = None) -> Flask:
         project = store.load() or {}
         segment_count = len(project.get("segments", []))
         source_dir = project.get("source_dir", "-")
-        store.clear()
+        try:
+            _clear_directory_contents(output)
+            store.clear()
+            tasks.reset_current()
+        except OSError as exc:
+            raise ApiError(
+                f"清除当前项目失败：{exc}", "project_clear_failed", 500
+            ) from exc
         tasks.record(
             f"已清除当前项目：素材目录={source_dir} · 分段={segment_count} 个 · "
-            "源照片、输出视频和归档未删除",
+            f"当前项目工作区已删除={store.current_dir} · 输出目录已清空={output} · "
+            f"源照片和归档目录未删除={archive_dir}",
             kind="project",
         )
-        return jsonify({"ok": True})
+        return jsonify({
+            "ok": True,
+            "cleared": {
+                "workspace_current": str(store.current_dir.resolve()),
+                "output_dir": str(output.resolve()),
+            },
+            "preserved": {
+                "source_dir": source_dir,
+                "archive_dir": str(archive_dir.resolve()),
+            },
+        })
 
     @app.post("/api/segments/split")
     def api_split_segment():
@@ -795,14 +860,14 @@ def create_app(overrides: dict | None = None) -> Flask:
     def api_thumbnails(segment_id: str):
         project = project_or_error()
         segment = _segment_by_id(project, segment_id)
+        frames = segment.get("frames", [])
         try:
             offset = int(request.args.get("offset", "0"))
-            limit = int(request.args.get("limit", "200"))
+            limit = int(request.args.get("limit", str(max(1, len(frames)))))
         except ValueError as exc:
             raise ApiError("offset 和 limit 必须是整数", "invalid_paging") from exc
         if offset < 0 or limit < 1:
             raise ApiError("offset 和 limit 超出范围", "invalid_paging")
-        frames = segment.get("frames", [])
         requested = list(enumerate(frames))[offset : offset + limit]
         thumbnail_dir = workspace / "current" / "segments" / segment_id / "thumbnails"
 
@@ -839,27 +904,7 @@ def create_app(overrides: dict | None = None) -> Flask:
     def api_frame_image(segment_id: str, frame_index: int):
         project = project_or_error()
         segment = _segment_by_id(project, segment_id)
-        frames = segment.get("frames", [])
-        if frame_index < 0 or frame_index >= len(frames):
-            raise ApiError("帧不存在", "not_found", 404)
-        frame = frames[frame_index]
-        source_value = frame.get("path") if isinstance(frame, dict) else frame
-        if not isinstance(source_value, str):
-            raise ApiError("帧不存在", "not_found", 404)
-        try:
-            source_root = Path(project["source_dir"]).resolve(strict=True)
-            source_path = Path(source_value).resolve(strict=True)
-            source_path.relative_to(source_root)
-        except (KeyError, OSError, ValueError):
-            raise ApiError("帧不存在", "not_found", 404) from None
-        registered = {
-            str(Path(item.get("path") if isinstance(item, dict) else item).resolve()).casefold()
-            for item in frames
-            if isinstance(item, (dict, str))
-            and isinstance(item.get("path") if isinstance(item, dict) else item, str)
-        }
-        if str(source_path).casefold() not in registered or not source_path.is_file():
-            raise ApiError("帧不存在", "not_found", 404)
+        source_path = frame_source_path(project, segment, frame_index)
         if source_path.suffix.casefold() in {".jpg", ".jpeg", ".png", ".webp"}:
             return send_file(source_path, conditional=True)
 
@@ -879,6 +924,147 @@ def create_app(overrides: dict | None = None) -> Flask:
             conditional=True,
         )
 
+    @app.get("/api/segments/<segment_id>/frames/<int:frame_index>/exif")
+    def api_frame_exif(segment_id: str, frame_index: int):
+        project = project_or_error()
+        segment = _segment_by_id(project, segment_id)
+        source_path = frame_source_path(project, segment, frame_index)
+        try:
+            entries = media_catalog.read_exif_details(source_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ApiError("EXIF 信息无法读取", "metadata_unavailable", 422) from exc
+        return jsonify({
+            "frame": {"index": frame_index, "name": source_path.name},
+            "count": len(entries),
+            "entries": entries,
+        })
+
+    @app.post("/api/hdr")
+    def api_hdr_merge():
+        require_idle()
+        body = _body()
+        project = project_or_error()
+        segment_id = body.get("segment_id")
+        frame_indices = body.get("frame_indices")
+        if not isinstance(segment_id, str):
+            raise ApiError("必须选择一个分段", "invalid_hdr")
+        if (
+            not isinstance(frame_indices, list)
+            or not 2 <= len(frame_indices) <= 9
+            or any(isinstance(index, bool) or not isinstance(index, int) for index in frame_indices)
+            or len(set(frame_indices)) != len(frame_indices)
+        ):
+            raise ApiError("HDR 必须选择 2 到 9 张不同照片", "invalid_hdr")
+        frame_indices = sorted(frame_indices)
+        segment = _segment_by_id(project, segment_id)
+        frames = segment.get("frames", [])
+        if any(index < 0 or index >= len(frames) for index in frame_indices):
+            raise ApiError("HDR 选择包含无效帧", "invalid_hdr")
+        paths = [frame_source_path(project, segment, index) for index in frame_indices]
+        exposure_times = [
+            frames[index].get("shutter") if isinstance(frames[index], dict) else None
+            for index in frame_indices
+        ]
+        mode = str(body.get("mode", "fusion")).casefold()
+        if mode == "radiance":
+            try:
+                valid_exposure_times = all(float(value) > 0 for value in exposure_times)
+            except (TypeError, ValueError):
+                valid_exposure_times = False
+            if not valid_exposure_times:
+                raise ApiError("辐射 HDR 需要每张照片都包含有效快门时间", "hdr_exposure_missing", 422)
+        option_keys = {
+            "mode", "align", "crop_edges", "deghost_strength", "contrast_weight",
+            "saturation_weight", "exposure_weight", "gamma", "intensity",
+            "light_adapt", "color_adapt", "post_contrast", "post_saturation",
+            "output_format",
+        }
+        options = {key: body[key] for key in option_keys if key in body}
+        options["mode"] = mode
+        output_format = str(options.get("output_format", "jpeg")).casefold()
+        if output_format not in hdr_merge.VALID_OUTPUT_FORMATS:
+            raise ApiError("HDR 输出格式无效", "invalid_hdr")
+        result_id = uuid.uuid4().hex[:12]
+        work_dir = workspace / "current" / "hdr" / result_id
+        preview_path = work_dir / "preview.jpg"
+        extension = ".tiff" if output_format == "tiff" else ".jpg"
+        output_name = video_export.sanitize_windows_filename(
+            f"{segment.get('name', segment_id)}-HDR-{result_id}{extension}"
+        )
+        output_path = output / "hdr" / output_name
+
+        def work(context: TaskContext):
+            context.log(
+                f"HDR 合成开始：分段={segment.get('name', segment_id)} · "
+                f"帧={','.join(str(index + 1) for index in frame_indices)} · "
+                f"模式={mode} · 输出={output_format}"
+            )
+            context.debug("HDR 参数：" + json.dumps(options, ensure_ascii=False, sort_keys=True))
+
+            def progress(done: int, total: int, **detail: Any) -> None:
+                context.progress(done, total, current_file=detail.get("stage"))
+
+            merged = hdr_merge.merge_exposures(
+                paths,
+                output_path,
+                preview_path,
+                options,
+                exposure_times=exposure_times,
+                progress=progress,
+                cancelled=context.cancelled,
+            )
+            context.raise_if_cancelled()
+            if not output_path.is_file() or not preview_path.is_file():
+                raise RuntimeError("HDR merge did not publish its output")
+            record = {
+                **merged,
+                "id": result_id,
+                "segment_id": segment_id,
+                "segment_name": segment.get("name", segment_id),
+                "frame_indices": frame_indices,
+                "frame_names": [path.name for path in paths],
+                "output_path": str(output_path.resolve()),
+                "output_name": output_path.name,
+                "preview_url": f"/media/current/hdr/{result_id}/preview.jpg",
+                "download_url": f"/api/hdr/results/{result_id}/file",
+            }
+
+            def save_result(state: dict) -> dict:
+                results = [
+                    result for result in state.get("hdr_results", [])
+                    if isinstance(result, dict) and result.get("id") != result_id
+                ]
+                results.append(record)
+                return {**state, "hdr_results": results}
+
+            store.update(save_result)
+            context.log(
+                f"HDR 合成完成：{merged['width']}×{merged['height']} · "
+                f"文件={output_path} · 大小={output_path.stat().st_size} 字节"
+            )
+            return record
+
+        return submit("hdr", work)
+
+    @app.get("/api/hdr/results")
+    def api_hdr_results():
+        project = project_or_error()
+        return jsonify({"results": project.get("hdr_results", [])})
+
+    @app.get("/api/hdr/results/<result_id>/file")
+    def api_hdr_result_file(result_id: str):
+        project = project_or_error()
+        result = hdr_result_by_id(project, result_id)
+        value = result.get("output_path")
+        try:
+            path = Path(value).resolve(strict=True)
+            path.relative_to((output / "hdr").resolve())
+        except (OSError, TypeError, ValueError):
+            raise ApiError("HDR 成果不存在", "not_found", 404) from None
+        if path.suffix.casefold() not in {".jpg", ".jpeg", ".tif", ".tiff"}:
+            raise ApiError("HDR 成果不存在", "not_found", 404)
+        return send_file(path, as_attachment=True, download_name=path.name)
+
     @app.get("/api/segments/<segment_id>/video")
     def api_segment_video(segment_id: str):
         project = project_or_error()
@@ -888,11 +1074,11 @@ def create_app(overrides: dict | None = None) -> Flask:
         segment_work_dir = (workspace / "current" / "segments" / segment_id).resolve()
         preview_value = segment.get("preview_file")
         candidates = []
-        if isinstance(artifact_value, str):
-            candidates.append((artifact_value, output.resolve()))
         if isinstance(preview_value, str):
             candidates.append((preview_value, segment_work_dir))
         candidates.append((str(segment_work_dir / "preview.mp4"), segment_work_dir))
+        if isinstance(artifact_value, str):
+            candidates.append((artifact_value, output.resolve()))
 
         for candidate_value, allowed_root in candidates:
             try:
@@ -927,8 +1113,14 @@ def create_app(overrides: dict | None = None) -> Flask:
     def run_process(project: dict, segment_ids: list[str], from_stage: str, context: TaskContext) -> dict:
         selected = [_segment_by_id(project, segment_id) for segment_id in segment_ids]
         settings_for_task = config_io.load_config(local_path=local_config_path)
-        multiplier = 2 if from_stage == "analyze" else 1
-        total = sum(len(segment.get("source_files", [])) * multiplier for segment in selected)
+        analyze_weight = 1 if from_stage == "analyze" else 0
+        render_weight = 8
+        preview_weight = 1
+        total = sum(
+            len(segment.get("source_files", []))
+            * (analyze_weight + render_weight + preview_weight)
+            for segment in selected
+        )
         completed = 0
         context.log(
             f"处理任务开始：分段={len(selected)} 个 · 起始阶段={from_stage} · "
@@ -949,24 +1141,39 @@ def create_app(overrides: dict | None = None) -> Flask:
                 "处理参数：" + json.dumps(recipe, ensure_ascii=False, sort_keys=True)
             )
 
-            def progress(done: int, _segment_total: int, **detail: Any) -> None:
-                frame = detail.get("frame") or detail.get("file")
-                context.progress(
-                    completed + done,
-                    total,
-                    current_segment=segment.get("name", segment_id),
-                    current_file=Path(frame).name if frame else None,
-                )
+            def stage_progress(base: int, weight: int, stage: str):
+                def update(done: int, stage_total: int, **detail: Any) -> None:
+                    frame = detail.get("frame") or detail.get("file")
+                    fraction = min(1.0, max(0.0, done / max(stage_total, 1)))
+                    context.progress(
+                        base + round(fraction * frame_total * weight),
+                        total,
+                        current_stage=stage,
+                        current_segment=segment.get("name", segment_id),
+                        current_file=Path(frame).name if frame else None,
+                    )
+
+                return update
+
+            context.progress(
+                completed,
+                total,
+                current_stage="analysis" if from_stage == "analyze" else "render",
+                current_segment=segment_name,
+            )
 
             if from_stage == "analyze":
+                analyze_progress = stage_progress(completed, analyze_weight, "analysis")
                 context.log(f"正在分析 {segment_name}")
-                analysis = image_pipeline.analyze_segment(segment, recipe, work_dir, progress, context.cancelled)
-                save_project_segment(segment_id, {"analysis": analysis, "render_status": "analyzed"})
+                analysis = image_pipeline.analyze_segment(
+                    segment, recipe, work_dir, analyze_progress, context.cancelled
+                )
+                save_project_segment(segment_id, {"analysis": None, "render_status": "analyzed"})
                 context.log(
                     f"分析完成 {segment_name}：{analysis.get('frame_count', frame_total)} 帧 · "
                     f"异常候选={len(analysis.get('anomaly_candidates', []))}"
                 )
-                completed += len(segment.get("source_files", []))
+                completed += frame_total * analyze_weight
             else:
                 analysis = segment.get("analysis")
                 if not isinstance(analysis, dict):
@@ -976,8 +1183,26 @@ def create_app(overrides: dict | None = None) -> Flask:
                     analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
 
             context.raise_if_cancelled()
-            context.log(f"正在渲染 {segment_name}：输出目录={work_dir / 'result'}")
-            result = image_pipeline.render_segment(segment, recipe, analysis, work_dir, progress, context.cancelled)
+            render_workers = image_pipeline.render_worker_count(recipe, frame_total)
+            resolved_render_device = image_pipeline.render_device(recipe)
+            render_device = image_pipeline.render_device_label(recipe)
+            if resolved_render_device == "gpu" and render_workers > 1:
+                parallelism = (
+                    f"RAW解码并行={render_workers} · GPU调色队列=1 · "
+                    f"JPEG编码并行={render_workers}"
+                )
+            else:
+                parallelism = f"帧处理并行数={render_workers}"
+            context.log(
+                f"正在渲染 {segment_name}：输出目录={work_dir / 'result'} · "
+                f"处理设备={render_device} · {parallelism}"
+            )
+            render_progress = stage_progress(completed, render_weight, "render")
+            result = image_pipeline.render_segment(
+                segment, recipe, analysis, work_dir, render_progress, context.cancelled
+            )
+            completed += frame_total * render_weight
+            preview_progress = stage_progress(completed, preview_weight, "preview")
             preview_settings = settings_for_task.get("preview", {})
             preview_path = work_dir / "preview.mp4"
             preview_options = {
@@ -986,6 +1211,12 @@ def create_app(overrides: dict | None = None) -> Flask:
                 "resolution": "preview",
                 "codec": "h264",
                 "crf": 24,
+                "hardware_acceleration": settings_for_task.get("export", {}).get(
+                    "hardware_acceleration", "auto"
+                ),
+                "_on_encoder_selected": lambda encoder: context.log(
+                    f"预览视频编码器：{encoder}"
+                ),
             }
             context.log(
                 f"正在生成 {segment_name} 预览视频："
@@ -995,21 +1226,30 @@ def create_app(overrides: dict | None = None) -> Flask:
                 work_dir / "result",
                 preview_path,
                 preview_options,
+                progress=preview_progress,
                 cancelled=context.cancelled,
             )
+            completed += frame_total * preview_weight
+            context.progress(
+                completed,
+                total,
+                current_stage="preview",
+                current_segment=segment_name,
+                current_file=preview_path.name,
+            )
             save_project_segment(segment_id, {
-                "analysis": analysis,
+                "analysis": None,
                 "render_status": "completed",
                 "output_files": [path.name for path in (work_dir / "result").glob("*.jpg")],
                 "representative_url": f"/media/current/segments/{segment_id}/thumbnails/000000.jpg",
                 "preview_file": str(preview_path),
                 "export_artifact": None,
+                "archive_artifact": None,
             })
             context.log(
                 f"渲染完成 {segment_name}：输出={result.frame_count} 帧 · "
                 f"跳过坏帧={result.rejected_count} 帧 · 预览视频={preview_path.name}"
             )
-            completed += len(segment.get("source_files", []))
         store.update(lambda state: {**state, "status": "processed", "active_job_id": None})
         context.log(f"处理任务完成：成功处理 {len(selected)} 个分段")
         return {"segments": len(selected)}
@@ -1042,7 +1282,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         try:
             cancelled = tasks.cancel()
         except TaskNotCancellable as exc:
-            raise ApiError("归档开始后不能取消", "non_cancellable", 409) from exc
+            raise ApiError("当前任务不能取消", "non_cancellable", 409) from exc
         return jsonify({"task": _task_response(cancelled)})
 
     @app.get("/api/tasks/current")
@@ -1068,38 +1308,118 @@ def create_app(overrides: dict | None = None) -> Flask:
         if not isinstance(ids, list) or not ids or not all(isinstance(item, str) for item in ids):
             raise ApiError("segment_ids 必须是非空数组", "invalid_export")
         selected = [_segment_by_id(project, segment_id) for segment_id in ids]
+        already_exported = next((
+            segment for segment in selected
+            if isinstance(segment.get("export_artifact"), dict)
+        ), None)
+        if already_exported is not None:
+            raise ApiError(
+                f"{already_exported.get('name', '当前分段')} 已导出；重新渲染成功后才能再次导出",
+                "already_exported",
+                409,
+            )
         options = config_io.deep_merge(config_io.load_config(local_path=local_config_path)["export"], {
             key: body[key] for key in {"fps", "resolution", "codec", "crf"} if key in body
         })
+        resolution = str(options.get("resolution", "4k")).lower()
+        options["resolution"] = "original" if resolution == "source" else resolution
         try:
-            if int(options["fps"]) not in video_export.VALID_FPS or str(options["codec"]).lower() not in video_export.CODECS:
+            if (
+                int(options["fps"]) not in video_export.VALID_FPS
+                or str(options["codec"]).lower() not in video_export.CODECS
+                or options["resolution"] not in {*video_export.RESOLUTIONS, "original"}
+            ):
                 raise ValueError
         except (TypeError, ValueError) as exc:
             raise ApiError("导出参数无效", "invalid_export") from exc
 
+        for segment in selected:
+            result_dir = workspace / "current" / "segments" / segment["id"] / "result"
+            first_frame = next((
+                path for path in sorted(result_dir.iterdir())
+                if path.is_file() and path.suffix.casefold() in video_export.FRAME_SUFFIXES
+            ), None) if result_dir.is_dir() else None
+            if first_frame is None:
+                continue
+            try:
+                video_export.validate_export_compatibility(first_frame, options)
+            except ValueError as exc:
+                raise ApiError(
+                    str(exc), "h264_nvenc_dimension_limit", 400
+                ) from exc
+
         def work(context: TaskContext):
             outputs = []
+            prepared = []
+            for segment in selected:
+                result_dir = workspace / "current" / "segments" / segment["id"] / "result"
+                frame_total = sum(
+                    1
+                    for path in result_dir.iterdir()
+                    if path.is_file()
+                    and path.suffix.casefold() in video_export.FRAME_SUFFIXES
+                ) if result_dir.is_dir() else 0
+                prepared.append((segment, result_dir, frame_total))
+            total_frames = sum(item[2] for item in prepared)
+            if total_frames <= 0:
+                raise ValueError("所选分段没有可导出的渲染帧")
             context.log(
                 f"导出任务开始：分段={len(selected)} 个 · fps={options['fps']} · "
                 f"分辨率={options['resolution']} · 编码={options['codec']} · CRF={options['crf']}"
             )
-            for index, segment in enumerate(selected, start=1):
+            completed_frames = 0
+            context.progress(0, total_frames, stage="preparing")
+            for segment, result_dir, frame_total in prepared:
                 context.raise_if_cancelled()
-                result_dir = workspace / "current" / "segments" / segment["id"] / "result"
                 identity = _result_identity(result_dir)
                 output.mkdir(parents=True, exist_ok=True)
                 target = output / _export_filename(segment)
+                segment_name = segment.get("name", segment["id"])
                 context.log(
-                    f"正在导出 {segment.get('name', segment['id'])}："
+                    f"正在导出 {segment_name}："
                     f"输入={identity['frame_count']} 帧 · 输出={target}"
                 )
+                def encoder_failed(encoder, message, name=segment_name):
+                    summary = " ".join(str(message).splitlines()).strip()[:300]
+                    context.log(
+                        f"视频编码器不可用 {name}：{encoder}"
+                        + (f" · {summary}" if summary else ""),
+                        "WARNING",
+                    )
+
+                export_options = {
+                    **options,
+                    "_on_encoder_attempt": lambda encoder, name=segment_name: context.log(
+                        f"正在使用视频编码器 {name}：{encoder}"
+                    ),
+                    "_on_encoder_failed": encoder_failed,
+                    "_on_encoder_selected": lambda encoder, name=segment_name: context.log(
+                        f"最终视频编码器 {name}：{encoder}"
+                    ),
+                }
+
+                def export_progress(done, total, **detail):
+                    context.progress(
+                        completed_frames + done,
+                        total_frames,
+                        current_segment=segment_name,
+                        current_file=detail.get("file"),
+                        encoded_frames=done,
+                        segment_total=total,
+                        encoder=detail.get("encoder"),
+                        fps=detail.get("fps"),
+                        speed=detail.get("speed"),
+                        eta_seconds=detail.get("eta_seconds"),
+                    )
+
                 result = video_export.export_video(
                     result_dir,
                     target,
-                    options,
-                    lambda done, total, **detail: context.progress(index - 1 + done / max(total, 1), len(selected), current_file=detail.get("file")),
+                    export_options,
+                    export_progress,
                     cancelled=context.cancelled,
                 )
+                completed_frames += frame_total
                 context.raise_if_cancelled()
                 artifact_path = Path(result).resolve()
                 if not artifact_path.is_relative_to(output.resolve()) or not artifact_path.is_file():
@@ -1133,6 +1453,17 @@ def create_app(overrides: dict | None = None) -> Flask:
         if not isinstance(ids, list) or not ids or not all(isinstance(item, str) for item in ids):
             raise ApiError("segment_ids 必须是非空数组", "invalid_segment")
         ids = list(dict.fromkeys(ids))
+        selected = [_segment_by_id(project, segment_id) for segment_id in ids]
+        already_archived = next((
+            segment for segment in selected
+            if isinstance(segment.get("archive_artifact"), dict)
+        ), None)
+        if already_archived is not None:
+            raise ApiError(
+                f"{already_archived.get('name', '当前分段')} 已归档；重新渲染并重新导出后才能再次归档",
+                "already_archived",
+                409,
+            )
         validate_archive_complete(project, ids)
 
         def work(context: TaskContext):
@@ -1147,7 +1478,15 @@ def create_app(overrides: dict | None = None) -> Flask:
                 archive_dir,
                 segment_ids=ids,
                 clear_workspace=False,
+                check_cancelled=context.raise_if_cancelled,
             )
+            for segment_id in ids:
+                save_project_segment(segment_id, {
+                    "archive_artifact": {
+                        "timestamp": destination.name,
+                        "path": str(destination),
+                    }
+                })
             context.log(f"归档完成：目录={destination} · 分段={len(ids)} 个")
             return {
                 "timestamp": destination.name,
@@ -1155,13 +1494,13 @@ def create_app(overrides: dict | None = None) -> Flask:
                 "segment_ids": ids,
             }
 
-        return submit("archive", work, cancellable_while_running=False)
+        return submit("archive", work)
 
     def archive_summary(timestamp: str, manifest: dict) -> dict:
         timestamp_root = _safe_archive_timestamp_dir(archive_dir, timestamp)
         paths = {
-            kind: _manifest_media_paths(timestamp_root, manifest, kind) if timestamp_root else []
-            for kind in ("previews", "outputs", "representatives")
+            "outputs": _manifest_media_paths(timestamp_root, manifest, "outputs")
+            if timestamp_root else []
         }
 
         def urls(kind: str) -> list[str]:
@@ -1171,10 +1510,10 @@ def create_app(overrides: dict | None = None) -> Flask:
             "timestamp": timestamp,
             "archived_at": manifest.get("archived_at"),
             "source_dir": manifest.get("source_dir"),
+            "source_file_count": manifest.get("source_file_count", 0),
             "segment_count": manifest.get("segment_count", 0),
-            "previews": urls("previews"),
+            "segments": manifest.get("segments", []),
             "outputs": urls("outputs"),
-            "representatives": urls("representatives"),
         }
 
     @app.get("/api/history")
@@ -1196,6 +1535,58 @@ def create_app(overrides: dict | None = None) -> Flask:
                     history.append(archive_summary(child.name, manifest))
         return jsonify({"history": history})
 
+    def unlock_deleted_archives(timestamps: set[str]) -> int:
+        project = store.load()
+        if project is None or not timestamps:
+            return 0
+        segment_ids = {
+            str(segment.get("id"))
+            for segment in project.get("segments", [])
+            if isinstance(segment.get("archive_artifact"), dict)
+            and str(segment["archive_artifact"].get("timestamp")) in timestamps
+        }
+        if not segment_ids:
+            return 0
+        store.update(lambda state: {
+            **state,
+            "segments": [
+                {**segment, "archive_artifact": None}
+                if str(segment.get("id")) in segment_ids else segment
+                for segment in state.get("segments", [])
+            ],
+        })
+        return len(segment_ids)
+
+    @app.delete("/api/history")
+    def api_delete_history():
+        require_idle()
+        if _body().get("confirm_delete") is not True:
+            raise ApiError("需要确认删除全部归档成果", "confirmation_required", 400)
+        deleted = 0
+        deleted_timestamps: set[str] = set()
+        if archive_dir.is_dir():
+            for child in list(archive_dir.iterdir()):
+                safe_child = _safe_archive_timestamp_dir(archive_dir, child.name)
+                if (
+                    safe_child is None
+                    or not safe_child.is_dir()
+                    or not (safe_child / "manifest.json").is_file()
+                ):
+                    continue
+                shutil.rmtree(safe_child)
+                deleted += 1
+                deleted_timestamps.add(child.name)
+        unlocked = unlock_deleted_archives(deleted_timestamps)
+        tasks.record(
+            f"已删除全部归档成果：共 {deleted} 条 · 已解锁 {unlocked} 个分段",
+            kind="archive",
+        )
+        return jsonify({
+            "ok": True,
+            "deleted_count": deleted,
+            "unlocked_segment_count": unlocked,
+        })
+
     @app.get("/api/history/<timestamp>")
     def api_history_item(timestamp: str):
         archive_path = _safe_archive_timestamp_dir(archive_dir, timestamp)
@@ -1210,6 +1601,26 @@ def create_app(overrides: dict | None = None) -> Flask:
             raise ApiError("归档记录不可读取", "archive_unavailable", 500) from exc
         return jsonify({"manifest": manifest, **archive_summary(timestamp, manifest)})
 
+    @app.delete("/api/history/<timestamp>")
+    def api_delete_history_item(timestamp: str):
+        require_idle()
+        if _body().get("confirm_delete") is not True:
+            raise ApiError("需要确认删除归档成果", "confirmation_required", 400)
+        archive_path = _safe_archive_timestamp_dir(archive_dir, timestamp)
+        if archive_path is None or not (archive_path / "manifest.json").is_file():
+            raise ApiError("归档不存在", "not_found", 404)
+        shutil.rmtree(archive_path)
+        unlocked = unlock_deleted_archives({timestamp})
+        tasks.record(
+            f"已删除归档成果：{timestamp} · 已解锁 {unlocked} 个分段",
+            kind="archive",
+        )
+        return jsonify({
+            "ok": True,
+            "timestamp": timestamp,
+            "unlocked_segment_count": unlocked,
+        })
+
     def settings_payload() -> dict:
         return config_io.load_config(local_path=local_config_path)
 
@@ -1219,6 +1630,11 @@ def create_app(overrides: dict | None = None) -> Flask:
         return {
             "settings": values,
             "effective_roots": {key: str(value) for key, value in effective_roots.items()},
+            "cleanup_targets": {
+                "workspace_current": str(store.current_dir.resolve()),
+                "output_dir": str(output.resolve()),
+                "archive_dir": str(archive_dir.resolve()),
+            },
             "restart_required": configured != startup_configured_roots,
         }
 
@@ -1228,6 +1644,14 @@ def create_app(overrides: dict | None = None) -> Flask:
         if log_level not in {"INFO", "DEBUG"}:
             raise ApiError("日志级别必须是 INFO 或 DEBUG", "invalid_log_level")
         candidate.setdefault("logging", {})["level"] = log_level
+        render_device = str(
+            candidate.get("processing", {}).get("render_device", "auto")
+        ).casefold()
+        if render_device not in {"auto", "cpu", "gpu"}:
+            raise ApiError(
+                "渲染设备必须是自动、CPU 或 GPU", "invalid_render_device"
+            )
+        candidate.setdefault("processing", {})["render_device"] = render_device
         try:
             candidate_roots = _configured_roots(candidate)
             _validate_runtime_roots(candidate_roots)
@@ -1398,7 +1822,8 @@ def _print_banner(host: str, port: int) -> None:
         "  用法：\n"
         "    · 浏览器会自动打开；没弹出就手动打开上面的本机地址。\n"
         "    · 工作台：选择照片目录 → 扫描 → 检查分段和帧 → 处理 → 导出。\n"
-        "    · 处理历史与日志：查看归档成果和任务记录；本窗口会同步输出日志。\n"
+        "    · HDR 合成：在帧检查中选择 2–9 张包围曝光照片并合成为 JPEG 或 TIFF。\n"
+        "    · 归档与日志：查看归档成果和任务记录；本窗口会同步输出日志。\n"
         "    · 色彩配方：查看、编辑、保存和删除实际参与渲染的调色预设。\n"
         "    · 设置：调整工作目录、自动分段、预览和导出参数。\n\n"
         "  这个窗口是服务日志，别关；关掉它 = 停止 WebUI。   停止：Ctrl+C\n"

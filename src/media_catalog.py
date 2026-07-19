@@ -16,6 +16,7 @@ from PIL import Image, UnidentifiedImageError
 
 
 SUPPORTED_EXTENSIONS = {".arw", ".jpg", ".jpeg"}
+EXIF_BINARY_FIELDS = {"JPEGThumbnail", "TIFFThumbnail", "Filename"}
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,8 @@ class FrameInfo:
     metering_mode: str | None
     focal_length: float | None
     white_balance: str | None
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 def _tag(tags: dict[str, Any], *names: str) -> Any | None:
@@ -73,6 +76,40 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _gps_decimal(value: Any, reference: Any) -> float | None:
+    values = getattr(value, "values", value)
+    if not isinstance(values, (list, tuple)) or len(values) < 3:
+        return None
+    parts = [_number(item) for item in values[:3]]
+    if any(item is None for item in parts):
+        return None
+    coordinate = float(parts[0]) + float(parts[1]) / 60 + float(parts[2]) / 3600
+    ref = str(_first_value(reference) or "").strip().upper()
+    return -coordinate if ref in {"S", "W"} else coordinate
+
+
+def _gps_coordinates(
+    latitude: Any,
+    latitude_ref: Any,
+    longitude: Any,
+    longitude_ref: Any,
+) -> tuple[float | None, float | None]:
+    return (
+        _gps_decimal(latitude, latitude_ref),
+        _gps_decimal(longitude, longitude_ref),
+    )
+
+
+def _jpeg_gps(exif: Any) -> tuple[float | None, float | None]:
+    try:
+        gps = exif.get_ifd(34853)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None, None
+    if not isinstance(gps, dict):
+        return None, None
+    return _gps_coordinates(gps.get(2), gps.get(1), gps.get(4), gps.get(3))
 
 
 def _captured_at(value: Any, path: Path) -> str:
@@ -122,6 +159,7 @@ def _read_jpeg_frame(path: Path) -> FrameInfo:
             or _jpeg_exif_value(exif, 36868)
             or _jpeg_exif_value(exif, 306)
         )
+        latitude, longitude = _jpeg_gps(exif)
         return FrameInfo(
             path=str(path.resolve()),
             name=path.name,
@@ -138,6 +176,8 @@ def _read_jpeg_frame(path: Path) -> FrameInfo:
             metering_mode=_text(_jpeg_exif_value(exif, 37383)),
             focal_length=_number(_jpeg_exif_value(exif, 37386)),
             white_balance=_text(_jpeg_exif_value(exif, 41987)),
+            latitude=latitude,
+            longitude=longitude,
         )
     try:
         with Image.open(path) as image:
@@ -156,6 +196,12 @@ def _read_frame(path: Path) -> FrameInfo:
     capture_tag = _tag(
         tags, "EXIF DateTimeOriginal", "EXIF DateTimeDigitized", "Image DateTime"
     ) or _jpeg_capture_tag(path)
+    latitude, longitude = _gps_coordinates(
+        _tag(tags, "GPS GPSLatitude"),
+        _tag(tags, "GPS GPSLatitudeRef"),
+        _tag(tags, "GPS GPSLongitude"),
+        _tag(tags, "GPS GPSLongitudeRef"),
+    )
     return FrameInfo(
         path=str(path.resolve()),
         name=path.name,
@@ -170,7 +216,29 @@ def _read_frame(path: Path) -> FrameInfo:
         metering_mode=_text(_tag(tags, "EXIF MeteringMode")),
         focal_length=_number(_tag(tags, "EXIF FocalLength")),
         white_balance=_text(_tag(tags, "EXIF WhiteBalance")),
+        latitude=latitude,
+        longitude=longitude,
     )
+
+
+def read_exif_details(path: Path) -> list[dict[str, str]]:
+    source = Path(path)
+    with source.open("rb") as handle:
+        tags = exifread.process_file(handle, details=True, strict=False)
+    entries = []
+    for name in sorted(tags, key=str.casefold):
+        if name in EXIF_BINARY_FIELDS:
+            continue
+        value = str(tags[name]).strip()
+        if not value:
+            continue
+        group, _, tag_name = name.partition(" ")
+        entries.append({
+            "group": group if tag_name else "EXIF",
+            "tag": tag_name or name,
+            "value": value[:4096] + ("…" if len(value) > 4096 else ""),
+        })
+    return entries
 
 
 def scan_source(
@@ -293,6 +361,25 @@ def _format_time_range(start: str | None, end: str | None) -> str | None:
     return f"{left:%Y-%m-%d %H:%M:%S}–{right:%Y-%m-%d %H:%M:%S}"
 
 
+def _format_capture_parts(start: str | None, end: str | None) -> tuple[str | None, str | None]:
+    left = _parse_time(start)
+    right = _parse_time(end)
+    if left is None or right is None:
+        return None, None
+    capture_date = (
+        f"{left:%Y-%m-%d}"
+        if left.date() == right.date()
+        else f"{left:%Y-%m-%d}–{right:%Y-%m-%d}"
+    )
+    return capture_date, f"{left:%H:%M:%S}–{right:%H:%M:%S}"
+
+
+def _format_location(latitude: float, longitude: float) -> str:
+    latitude_ref = "N" if latitude >= 0 else "S"
+    longitude_ref = "E" if longitude >= 0 else "W"
+    return f"{abs(latitude):.6f}°{latitude_ref}, {abs(longitude):.6f}°{longitude_ref}"
+
+
 def _refresh_segment_metadata(segment: dict) -> None:
     frames = segment.get("frames", [])
     focals = [float(item["focal_length"]) for item in frames if item.get("focal_length") is not None]
@@ -307,6 +394,22 @@ def _refresh_segment_metadata(segment: dict) -> None:
     segment["time_range"] = _format_time_range(
         segment["captured_start"], segment["captured_end"]
     )
+    segment["capture_date"], segment["capture_time"] = _format_capture_parts(
+        segment["captured_start"], segment["captured_end"]
+    )
+    coordinates = [
+        (float(item["latitude"]), float(item["longitude"]))
+        for item in frames
+        if item.get("latitude") is not None and item.get("longitude") is not None
+    ]
+    if coordinates:
+        segment["latitude"] = sum(item[0] for item in coordinates) / len(coordinates)
+        segment["longitude"] = sum(item[1] for item in coordinates) / len(coordinates)
+        segment["location"] = _format_location(segment["latitude"], segment["longitude"])
+    else:
+        segment["latitude"] = None
+        segment["longitude"] = None
+        segment["location"] = None
 
 
 def _new_segment(frames: list[FrameInfo], number: int, start_index: int) -> dict:

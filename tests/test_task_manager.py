@@ -228,6 +228,21 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(self.manager.history(), [])
         self.assertEqual(self.manager.snapshot()["logs"], [])
 
+    def test_reset_current_returns_to_idle_without_deleting_history(self):
+        self.manager.submit("render", lambda context: context.log("render complete"))
+        completed = self.wait_for("completed")
+        history = self.manager.history()
+
+        reset = self.manager.reset_current()
+
+        self.assertEqual(reset["status"], "idle")
+        self.assertIsNone(reset["job_id"])
+        self.assertEqual(reset["completed"], 0)
+        self.assertEqual(reset["total"], 0)
+        self.assertEqual(reset["detail"], {})
+        self.assertEqual(reset["history_logs"], history)
+        self.assertNotEqual(completed["status"], reset["status"])
+
     def test_transient_permission_error_during_persist_is_retried(self):
         real_replace = __import__("os").replace
         attempts = []

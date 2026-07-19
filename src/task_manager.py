@@ -386,6 +386,18 @@ class TaskManager:
             self._state["history_logs"] = []
             self._persist_locked()
 
+    def reset_current(self) -> dict:
+        with self._lock:
+            if self._state["status"] in ACTIVE_STATES:
+                raise TaskBusy("cannot reset an active task")
+            history_logs = list(self._state.get("history_logs") or [])
+            self._state = {
+                **self._empty_state(),
+                "history_logs": history_logs,
+            }
+            self._persist_locked()
+            return deepcopy(self._state)
+
     def snapshot(self) -> dict:
         with self._lock:
             return deepcopy(self._state)

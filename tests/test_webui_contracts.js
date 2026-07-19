@@ -7,6 +7,7 @@ const nodeAssert = require("assert/strict");
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "webui", "index.html"), "utf8");
 const js = fs.readFileSync(path.join(root, "webui", "app.js"), "utf8");
+const css = fs.readFileSync(path.join(root, "webui", "styles.css"), "utf8");
 const prefs = require(path.join(root, "webui", "ui_prefs.js"));
 
 function assert(condition, message) {
@@ -39,9 +40,12 @@ for (const id of [
   "pick-source-btn", "scan-btn", "segment-list", "segment-preview",
   "recipe-select", "frame-strip", "frame-multi-select-btn", "process-current-btn", "cancel-btn",
   "task-progress", "task-log", "export-btn", "preview-video-btn", "archive-dialog",
-  "export-progress-dialog", "export-progress", "export-progress-cancel-btn",
-  "history-list", "settings-form", "color-preset-list", "color-preset-form",
-  "new-color-preset-btn", "delete-color-preset-btn", "preview-histogram", "chart-type-select"
+  "export-progress-dialog", "export-progress", "export-progress-percent", "export-progress-stats", "export-progress-cancel-btn",
+  "archive-progress-dialog", "archive-spinner", "archive-progress-cancel-btn",
+  "scan-progress-dialog", "scan-progress", "scan-progress-cancel-btn", "scan-progress-close-btn",
+  "history-list", "delete-all-history-btn", "settings-form", "color-preset-list", "color-preset-form",
+  "new-color-preset-btn", "delete-color-preset-btn", "preview-histogram", "chart-type-select",
+  "hdr-send-btn", "hdr-form", "hdr-frame-list", "hdr-preview", "hdr-start-btn", "hdr-cancel-btn", "hdr-download-btn"
 ]) {
   assert(ids.includes(id), `Missing required element #${id}`);
   assert(js.includes(`byId("${id}")`) || js.includes(`#${id}`), `JavaScript does not bind #${id}`);
@@ -52,7 +56,7 @@ for (const route of [
   "/api/segments/split", "/api/segments/merge", "/api/segments/reorder",
   "/api/process", "/api/process/retry", "/api/tasks/cancel",
   "/api/tasks/current", "/api/logs", "/api/export", "/api/archive", "/api/history",
-  "/api/settings", "/api/color-presets"
+  "/api/settings", "/api/color-presets", "/api/hdr"
 ]) {
   assert(js.includes(route), `Missing API route ${route}`);
 }
@@ -61,18 +65,27 @@ assert(js.includes("addEventListener"), "Events must use addEventListener");
 assert(js.includes("setInterval(pollTask, 1000)"), "Active task polling must run every second");
 assert(js.includes("preserve_source: true"), "Archive request must explicitly preserve source files");
 assert(js.includes("currentSegmentIdsForAction()"), "Work actions must use the current segment scope");
+assert(js.includes("updateArchiveProgressDialog"), "Archive needs a dedicated in-progress dialog");
 assert(!html.includes('class="task-bar"'), "The floating task bar must be removed");
 assert(html.includes('class="workflow-action-row"'), "Task controls must be embedded in final export");
 assert(html.includes('id="output-flyout" class="output-flyout"'), "Final export must be a collapsible flyout");
+assert(html.includes('id="output-flyout" class="output-flyout" aria-labelledby="output-heading" open'), "Final export must be expanded by default");
+assert(html.includes('<section id="advanced-settings" class="advanced-settings"'), "Advanced color controls must always be visible");
+assert(!html.includes('<details id="advanced-settings"'), "Advanced color controls must not be collapsible");
 assert(html.includes('data-i18n="task.start_current">渲染</button>'), "Current segment action must be Render");
 assert(!html.includes('id="retry-btn"'), "Render replaces the separate retry action");
 assert(js.includes('byId("app").dataset.activeView = viewName'), "View switches must hide workbench-only sidebar content");
 assert(js.includes('!state.segmentMultiSelect && isCurrent'), "Merge mode must suppress the single-select style");
 assert(js.includes("updateExportDialog"), "Export needs an in-progress dialog");
+assert(html.includes('id="export-progress"'), "Export dialog must show real FFmpeg progress");
+assert(js.includes('dialog.export_progress.h264_oversize'), "Oversize H.264 exports need an actionable preflight message");
+assert(!html.includes('id="export-progress-preview-btn"'), "Export dialog must not include video preview");
+assert(!html.includes('id="export-spinner"'), "Export dialog must replace the spinner with measured progress");
 assert(html.includes('role="tablist"'), "Tab list semantics are required");
-assert((html.match(/role="tab"/g) || []).length === 4, "All four tabs need tab roles");
+assert((html.match(/role="tab"/g) || []).length === 5, "All five tabs need tab roles");
 assert(html.includes('aria-valuenow="0"'), "Progress needs an ARIA current value");
 assert(js.includes('setAttribute("aria-valuenow", String(percent))'), "Progress ARIA value must update");
+assert(js.includes("if (options.showError === false) throw error"), "startOperation must allow dialog-owned error handling");
 
 for (const functionName of ["processCurrentSegment", "exportVideo"]) {
   const start = js.indexOf(`async function ${functionName}`);
@@ -81,6 +94,8 @@ for (const functionName of ["processCurrentSegment", "exportVideo"]) {
   assert(body.indexOf("await flushRecipeSave()") >= 0, `${functionName} must flush the recipe`);
   assert(body.indexOf("await flushRecipeSave()") < body.indexOf("await startOperation("), `${functionName} flush must precede operation start`);
 }
+const processBody = js.slice(js.indexOf("async function processCurrentSegment"), js.indexOf("\n}", js.indexOf("async function processCurrentSegment")));
+assert(!processBody.includes("options.showError"), "Render error handling must not reference startOperation options");
 
 assert(js.includes("segment?.source_files?.[index]"), "Rejected frames must use source file identifiers");
 assert(js.includes("rejected.add(stableId)"), "Rejected frame payload must use stable IDs");
@@ -88,12 +103,24 @@ assert(!js.includes("rejected.add(index)"), "Rejected frame payload cannot use a
 assert(js.includes("historySortValue(right) - historySortValue(left)"), "History needs descending client sort");
 assert(js.includes("recipeSummary(entry)"), "History needs recipe summaries");
 assert(js.includes("async function loadHistoryDetail(summary)"), "History details need a dedicated merge path");
-assert(js.includes("summary.previews || summary.preview_videos"), "History merge must retain summary preview URLs");
 assert(js.includes("summary.outputs || summary.final_videos"), "History merge must retain summary output URLs");
-assert(js.includes("manifest.previews || manifest.preview_videos"), "History merge must include manifest preview URLs");
 assert(js.includes("manifest.outputs || manifest.final_videos"), "History merge must include manifest output URLs");
-assert(js.includes("segmentCounts.reduce((total, count) => total + count, 0)"), "JPEG count must sum segment manifest counts");
-assert(js.includes("entry.jpeg_count ?? entry.frame_count ?? 0"), "JPEG count needs legacy top-level fallback");
+assert(!js.includes('appendMediaLinks(media, t("history.preview")'), "History must show only final videos");
+assert(js.includes("segmentCounts.reduce((total, count) => total + count, 0)"), "Original count must sum segment manifest counts");
+assert(js.includes("entry.source_file_count"), "Original count needs a top-level fallback");
+assert(js.includes("function historyCaptureSummary(entry)"), "History must render capture metadata");
+assert(js.includes("async function deleteHistoryEntry"), "History needs per-archive deletion");
+assert(js.includes("async function deleteAllHistory"), "History needs delete-all support");
+assert(js.includes("function potPlayerUrl"), "Archived final videos need a PotPlayer protocol URL");
+assert(js.includes("link.href = potPlayerUrl"), "Archived final videos must open through PotPlayer");
+for (const functionName of ["deleteHistoryEntry", "deleteAllHistory"]) {
+  const start = js.indexOf(`async function ${functionName}`);
+  const body = js.slice(start, js.indexOf("\n}", start));
+  assert(body.includes("refreshState()"), `${functionName} must refresh project state after deletion`);
+}
+assert(css.includes('.history-media-link::before { content: "\\25B6"'), "Final video links need a play icon");
+assert(html.indexOf('id="settings-log-level"') < html.indexOf('id="view-recipes"'), "Log level belongs on the history/log page");
+assert(js.includes('byId("settings-log-level").addEventListener("change", saveLogLevel)'), "Log level must save from the log page");
 assert(html.includes('id="settings-save-status"'), "Settings need a live save status");
 assert(js.includes("payload.restart_required"), "Settings must inspect restart_required");
 assert(js.includes('t("settings.saved_restart")'), "Restart-required save notice must be translated");
@@ -103,7 +130,13 @@ for (const token of ["theme-choice", "language-choice", "data-theme-choice", "da
 }
 assert(!html.includes('id="open-settings-btn"'), "Header settings shortcut should be removed");
 assert(js.includes("state.thumbnailTotal ? new Set([0]) : new Set()"), "Segment switching must select the first full-resolution frame");
-assert(js.includes("const PAGE_SIZE = 20"), "Frame review must show 20 thumbnails per page");
+assert(js.includes('segment?.preview_file ? t("history.preview") : t("history.output")'), "Workbench video caption must describe the preview source first");
+assert(js.includes("api(API.thumbnails(segmentId))"), "Frame review must request the complete thumbnail list at once");
+assert(!js.includes("loadMoreThumbnails"), "Frame review must not incrementally load thumbnails");
+assert(!js.includes('byId("frame-strip").addEventListener("scroll"'), "Frame review must not depend on scroll loading");
+assert(css.includes('.frame-thumb { position: relative; aspect-ratio: 4 / 3;'), "Frame thumbnail cards must preserve the camera aspect ratio");
+assert(css.includes('.frame-thumb img { width: 100%; height: 100%; object-fit: contain;'), "Frame thumbnails must preserve their original aspect ratio");
+assert(!html.includes('class="frame-pagination"'), "Frame review must not show pagination controls");
 assert(!html.includes('data-view="logs"'), "History and logs must share one view");
 assert(html.includes('data-view="recipes"'), "Color recipes need their own view");
 assert(!html.includes('id="recipe-mode"'), "Workbench recipe shortcuts must be removed");

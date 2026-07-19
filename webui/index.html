@@ -34,7 +34,7 @@
       <div><h1 id="source-heading" data-i18n="source.title">素材</h1><p id="source-summary" class="summary-line" data-i18n="source.help">选择包含 ARW、JPG 或 JPEG 的目录。</p></div>
       <div class="command-row">
         <button id="pick-source-btn" type="button" data-i18n="source.pick">选择目录</button>
-        <button id="scan-btn" class="primary-button" type="button" data-i18n="source.scan">扫描素材</button>
+        <button id="scan-btn" class="primary-button" type="button" disabled data-i18n="source.rescan">重新扫描</button>
         <button id="clear-project-btn" class="danger-quiet-button" type="button" data-i18n="source.clear">清除当前项目</button>
       </div>
     </section>
@@ -42,7 +42,8 @@
     <aside id="sidebar-nav" class="studio-sidebar">
       <nav class="tab-bar" role="tablist" aria-label="主导航" data-i18n-aria-label="nav.primary">
         <button id="tab-workbench" class="tab-button is-active" type="button" role="tab" tabindex="0" data-view="workbench" aria-controls="view-workbench" aria-selected="true" data-i18n="nav.workbench">工作台</button>
-        <button id="tab-history" class="tab-button" type="button" role="tab" tabindex="-1" data-view="history" aria-controls="view-history" aria-selected="false" data-i18n="nav.history">处理历史与日志</button>
+        <button id="tab-hdr" class="tab-button" type="button" role="tab" tabindex="-1" data-view="hdr" aria-controls="view-hdr" aria-selected="false" data-i18n="nav.hdr">HDR 合成</button>
+        <button id="tab-history" class="tab-button" type="button" role="tab" tabindex="-1" data-view="history" aria-controls="view-history" aria-selected="false" data-i18n="nav.history">归档与日志</button>
         <button id="tab-recipes" class="tab-button" type="button" role="tab" tabindex="-1" data-view="recipes" aria-controls="view-recipes" aria-selected="false" data-i18n="nav.recipes">色彩配方</button>
         <button id="tab-settings" class="tab-button" type="button" role="tab" tabindex="-1" data-view="settings" aria-controls="view-settings" aria-selected="false" data-i18n="nav.settings">设置</button>
       </nav>
@@ -106,11 +107,7 @@
                     <button id="frame-multi-select-btn" class="toggle-button" type="button" aria-pressed="false" data-i18n="frames.multi_select">多选</button>
                     <button id="bad-frame-btn" type="button" data-i18n="frames.mark_bad">标记坏帧</button>
                     <button id="unmark-bad-frame-btn" type="button" data-i18n="frames.unmark_bad">取消坏帧</button>
-                  </div>
-                  <div class="frame-pagination">
-                    <button id="frame-page-prev" class="icon-button" type="button" title="上一页" aria-label="上一页缩略图" data-i18n-title="frames.previous" data-i18n-aria-label="frames.previous">&#8249;</button>
-                    <span id="frame-page-label" class="page-label">0 / 0</span>
-                    <button id="frame-page-next" class="icon-button" type="button" title="下一页" aria-label="下一页缩略图" data-i18n-title="frames.next" data-i18n-aria-label="frames.next">&#8250;</button>
+                    <button id="hdr-send-btn" type="button" data-i18n="frames.send_hdr">发送到 HDR</button>
                   </div>
                 </summary>
                 <div class="frame-panel-content">
@@ -123,31 +120,29 @@
                 <summary class="rail-panel-summary"><h3 id="recipe-heading" data-i18n="recipe.title">色彩配方</h3></summary>
                 <div class="recipe-panel-content">
                   <div class="control-grid">
-                    <label for="recipe-select"><span data-i18n="recipe.mode">配方预设</span><select id="recipe-select"><option value="natural" data-i18n="recipe.natural">自然</option></select></label>
+                    <label class="recipe-select-field" for="recipe-select"><select id="recipe-select" aria-label="配方预设" data-i18n-aria-label="recipe.mode"><option value="natural" data-i18n="recipe.natural">自然</option></select></label>
                     <label for="recipe-strength"><span><span data-i18n="recipe.strength">配方强度</span> <output id="recipe-strength-value">100%</output></span><input id="recipe-strength" type="range" min="0" max="150" value="100"></label>
-                    <label for="golden-strength"><span><span data-i18n="recipe.golden">日照金山强度</span> <output id="golden-strength-value">0%</output></span><input id="golden-strength" type="range" min="0" max="150" value="0"></label>
-                    <label class="toggle-field deflicker-toggle" for="deflicker-enabled"><input id="deflicker-enabled" type="checkbox" checked><span data-i18n="recipe.deflicker">启用去闪</span></label>
+                    <label for="golden-strength"><span><span data-i18n="recipe.golden">霞光增强</span> <output id="golden-strength-value">0%</output></span><input id="golden-strength" type="range" min="0" max="150" value="0"></label>
                   </div>
-                  <details id="advanced-settings" class="advanced-settings">
-                    <summary data-i18n="recipe.advanced">高级参数</summary>
+                  <section id="advanced-settings" class="advanced-settings" aria-label="高级参数" data-i18n-aria-label="recipe.advanced">
                     <div class="control-grid advanced-grid">
                       <label for="deflicker-window"><span data-i18n="recipe.window">去闪窗口</span><input id="deflicker-window" type="number" min="3" max="129" step="2" value="15"></label>
                       <label for="gain-limit"><span data-i18n="recipe.gain_limit">曝光增益上限</span><input id="gain-limit" type="number" min="1" max="8" step="0.1" value="2"></label>
                       <label for="golden-start"><span data-i18n="recipe.golden_start">强化起始帧</span><input id="golden-start" type="number" min="0" step="1"></label>
                       <label for="golden-end"><span data-i18n="recipe.golden_end">强化结束帧</span><input id="golden-end" type="number" min="0" step="1"></label>
                     </div>
-                  </details>
+                  </section>
                 </div>
               </details>
             </div>
 
             <figure class="preview-stage">
               <div id="segment-preview" class="preview-surface" aria-label="当前分段预览" data-i18n-aria-label="preview.current"><span data-i18n="preview.none">暂无预览</span><details id="preview-histogram-panel" class="preview-histogram-panel" open><summary data-i18n="preview.histogram">直方图</summary><canvas id="preview-histogram" class="preview-histogram" width="256" height="96" aria-label="当前画面 RGB 直方图" data-i18n-aria-label="preview.histogram_aria"></canvas></details></div>
-              <figcaption id="preview-caption" data-i18n="preview.select">选择分段后查看代表帧</figcaption>
+              <figcaption id="preview-caption" class="preview-caption" data-i18n="preview.select">选择分段后查看代表帧</figcaption>
             </figure>
           </div>
 
-          <details id="output-flyout" class="output-flyout" aria-labelledby="output-heading">
+          <details id="output-flyout" class="output-flyout" aria-labelledby="output-heading" open>
             <summary class="output-summary">
               <strong id="output-heading" data-i18n="export.title">最终导出</strong>
               <strong id="task-status" data-i18n="status.idle">空闲</strong>
@@ -158,32 +153,77 @@
             <div id="task-panel" class="workflow-panel" aria-label="当前分段任务" data-i18n-aria-label="task.current_panel">
               <div class="workflow-action-row">
                 <label for="export-fps"><span data-i18n="export.fps">帧率</span><select id="export-fps"><option value="24">24</option><option value="25">25</option><option value="30" selected>30</option><option value="60">60</option></select></label>
-                <label for="export-resolution"><span data-i18n="export.resolution">分辨率</span><select id="export-resolution"><option value="1080p">1080p</option><option value="4k" selected>4K</option><option value="source" data-i18n="export.source_width">原图宽度</option></select></label>
+                <label for="export-resolution"><span data-i18n="export.resolution">分辨率</span><select id="export-resolution"><option value="1080p">1080p</option><option value="4k" selected>4K</option><option value="original" data-i18n="export.source_width">原图宽度</option></select></label>
                 <label for="export-codec"><span data-i18n="export.codec">编码</span><select id="export-codec"><option value="h264">H.264</option><option value="h265">H.265</option></select></label>
                 <label for="export-crf"><span data-i18n="export.crf">CRF</span><input id="export-crf" type="number" min="0" max="51" value="18"></label>
+                <label class="toggle-field deflicker-toggle export-deflicker-toggle" for="deflicker-enabled"><input id="deflicker-enabled" type="checkbox" checked><span data-i18n="recipe.deflicker">启用去闪</span></label>
                 <button id="process-current-btn" class="primary-button" type="button" data-i18n="task.start_current">渲染</button>
-                <button id="export-btn" type="button" data-i18n="export.start">导出视频</button>
-                <button id="preview-video-btn" type="button" data-i18n="export.preview">预览视频</button>
-                <button id="archive-btn" type="button" title="校验并保存成果副本到归档目录" data-i18n="archive.start" data-i18n-title="archive.explain">归档成果</button>
                 <button id="cancel-btn" class="danger-quiet-button" type="button" disabled data-i18n="task.cancel">取消</button>
+                <button id="preview-video-btn" type="button" data-i18n="export.preview">预览视频</button>
+                <button id="export-btn" type="button" data-i18n="export.start">导出视频</button>
+                <button id="archive-btn" type="button" title="校验并保存成果副本到归档目录" data-i18n="archive.start" data-i18n-title="archive.explain">归档成果</button>
               </div>
             </div>
           </details>
         </section>
       </section>
 
+      <section id="view-hdr" class="view" role="tabpanel" tabindex="0" aria-labelledby="tab-hdr" data-view-panel="hdr" hidden>
+        <header class="page-heading"><div><h1 data-i18n="hdr.title">HDR 合成</h1><p class="summary-line" data-i18n="hdr.help">合并同一场景的包围曝光照片，保留高光与阴影细节。</p></div></header>
+        <div class="hdr-workspace">
+          <section class="hdr-source-panel" aria-labelledby="hdr-source-heading">
+            <div class="region-heading"><h2 id="hdr-source-heading" data-i18n="hdr.source">已选原片</h2><span id="hdr-source-count" class="status-pill">0 / 9</span></div>
+            <p id="hdr-source-summary" class="summary-line" data-i18n="hdr.empty">在工作台帧检查中多选 2–9 张照片，然后发送到 HDR。</p>
+            <div id="hdr-frame-list" class="hdr-frame-list"></div>
+          </section>
+
+          <figure class="hdr-preview-stage">
+            <div id="hdr-preview" class="hdr-preview-surface"><span data-i18n="hdr.preview_empty">合成后在此显示预览</span></div>
+            <figcaption id="hdr-preview-caption" data-i18n="hdr.preview_caption">尚未生成 HDR 成果</figcaption>
+          </figure>
+
+          <form id="hdr-form" class="hdr-controls">
+            <div class="region-heading"><h2 data-i18n="hdr.parameters">合成参数</h2><span id="hdr-status" class="status-pill" data-status="idle" data-i18n="status.idle">空闲</span></div>
+            <label for="hdr-mode"><span data-i18n="hdr.mode">合成模式</span><select id="hdr-mode"><option value="fusion" data-i18n="hdr.mode_fusion">曝光融合</option><option value="radiance" data-i18n="hdr.mode_radiance">辐射 HDR</option></select></label>
+            <p id="hdr-mode-help" class="field-help" data-i18n="hdr.mode_fusion_help">适合大多数照片，不依赖快门 EXIF，成片自然。</p>
+            <div class="hdr-toggle-row">
+              <label class="toggle-field" for="hdr-align"><input id="hdr-align" type="checkbox" checked><span data-i18n="hdr.align">自动对齐</span></label>
+              <label class="toggle-field" for="hdr-crop"><input id="hdr-crop" type="checkbox" checked><span data-i18n="hdr.crop">裁切对齐边缘</span></label>
+            </div>
+            <label for="hdr-deghost"><span><span data-i18n="hdr.deghost">运动抑制</span> <output id="hdr-deghost-value">25%</output></span><input id="hdr-deghost" type="range" min="0" max="100" value="25"></label>
+            <fieldset id="hdr-fusion-fields" class="hdr-parameter-group"><legend data-i18n="hdr.fusion_parameters">曝光融合权重</legend>
+              <label for="hdr-contrast-weight"><span data-i18n="hdr.contrast_weight">细节对比</span><input id="hdr-contrast-weight" type="number" min="0" max="5" step="0.1" value="1"></label>
+              <label for="hdr-saturation-weight"><span data-i18n="hdr.saturation_weight">色彩权重</span><input id="hdr-saturation-weight" type="number" min="0" max="5" step="0.1" value="1"></label>
+              <label for="hdr-exposure-weight"><span data-i18n="hdr.exposure_weight">曝光权重</span><input id="hdr-exposure-weight" type="number" min="0" max="5" step="0.1" value="0.2"></label>
+            </fieldset>
+            <fieldset id="hdr-radiance-fields" class="hdr-parameter-group" hidden><legend data-i18n="hdr.tonemap_parameters">色调映射</legend>
+              <label for="hdr-gamma"><span data-i18n="hdr.gamma">伽马</span><input id="hdr-gamma" type="number" min="0.1" max="5" step="0.1" value="2.2"></label>
+              <label for="hdr-intensity"><span data-i18n="hdr.intensity">整体亮度</span><input id="hdr-intensity" type="number" min="-8" max="8" step="0.1" value="0"></label>
+              <label for="hdr-light-adapt"><span data-i18n="hdr.light_adapt">明暗适应</span><input id="hdr-light-adapt" type="number" min="0" max="1" step="0.05" value="1"></label>
+              <label for="hdr-color-adapt"><span data-i18n="hdr.color_adapt">色彩适应</span><input id="hdr-color-adapt" type="number" min="0" max="1" step="0.05" value="0"></label>
+            </fieldset>
+            <fieldset class="hdr-parameter-group"><legend data-i18n="hdr.finish_parameters">成片调整</legend>
+              <label for="hdr-post-contrast"><span data-i18n="hdr.post_contrast">最终对比度</span><input id="hdr-post-contrast" type="number" min="0.25" max="3" step="0.05" value="1"></label>
+              <label for="hdr-post-saturation"><span data-i18n="hdr.post_saturation">最终饱和度</span><input id="hdr-post-saturation" type="number" min="0" max="3" step="0.05" value="1"></label>
+              <label for="hdr-output-format"><span data-i18n="hdr.output_format">输出格式</span><select id="hdr-output-format"><option value="jpeg" data-i18n="hdr.jpeg">JPEG</option><option value="tiff" data-i18n="hdr.tiff">16 位 TIFF</option></select></label>
+            </fieldset>
+            <div class="hdr-actions"><button id="hdr-start-btn" class="primary-button" type="submit" data-i18n="hdr.start">开始合成</button><button id="hdr-cancel-btn" class="danger-quiet-button" type="button" disabled data-i18n="task.cancel">取消</button><button id="hdr-download-btn" type="button" disabled data-i18n="hdr.download">下载成果</button></div>
+          </form>
+        </div>
+      </section>
+
       <section id="view-history" class="view" role="tabpanel" tabindex="0" aria-labelledby="tab-history" data-view-panel="history" hidden>
-        <header class="page-heading"><div><h1 data-i18n="history.title">处理历史与日志</h1><p class="summary-line" data-i18n="history.help">查看归档成果和当前服务的处理日志。</p></div><div class="page-actions"><button id="refresh-history-btn" type="button" data-i18n="history.refresh">刷新</button><button id="clear-logs-btn" class="danger-quiet-button" type="button" data-i18n="logs.clear">清除历史日志</button></div></header>
+        <header class="page-heading"><div><h1 data-i18n="history.title">归档与日志</h1><p class="summary-line" data-i18n="history.help">查看归档成果和当前服务的处理日志。</p></div><div class="page-actions"><button id="refresh-history-btn" type="button" data-i18n="history.refresh">刷新</button></div></header>
         <div class="history-log-layout">
-          <section class="history-region" aria-labelledby="archive-history-heading"><h2 id="archive-history-heading" data-i18n="history.archive_heading">归档记录</h2><div id="history-list" class="history-list" aria-live="polite"></div></section>
-          <section class="logs-region" aria-labelledby="task-log-heading"><h2 id="task-log-heading" data-i18n="logs.title">任务日志</h2><pre id="task-log" class="log-console" aria-live="polite" data-i18n="task.no_logs">暂无日志</pre></section>
+          <section class="history-region" aria-labelledby="archive-history-heading"><div id="archive-history-bar" class="region-heading is-collapsible"><h2 id="archive-history-heading"><button id="archive-history-toggle" class="region-collapse-toggle" type="button" aria-expanded="true" aria-controls="history-list"><span class="disclosure-icon" aria-hidden="true">&#9662;</span><span data-i18n="history.archive_heading">归档记录</span></button></h2><button id="delete-all-history-btn" class="danger-quiet-button" type="button" data-i18n="history.delete_all">全部删除</button></div><div id="history-list" class="history-list" aria-live="polite"></div></section>
+          <section class="logs-region" aria-labelledby="task-log-heading"><div id="task-log-bar" class="region-heading log-heading is-collapsible"><h2 id="task-log-heading"><button id="task-log-toggle" class="region-collapse-toggle" type="button" aria-expanded="true" aria-controls="task-log-content"><span class="disclosure-icon" aria-hidden="true">&#9662;</span><span data-i18n="logs.title">任务日志</span></button></h2><label class="log-level-control" for="settings-log-level"><span data-i18n="settings.log_level">日志级别</span><select id="settings-log-level"><option value="INFO">INFO</option><option value="DEBUG">DEBUG</option></select></label><span id="settings-log-level-status" class="save-status" role="status" aria-live="polite"></span><button id="clear-logs-btn" class="danger-quiet-button" type="button" data-i18n="logs.clear">清除历史日志</button></div><small class="log-level-help" data-i18n="settings.logging">DEBUG 会记录逐帧进度、处理参数和异常堆栈。</small><div id="task-log-content" class="task-log-content"><pre id="task-log" class="log-console" aria-live="polite" data-i18n="task.no_logs">暂无日志</pre></div></section>
         </div>
       </section>
 
       <section id="view-recipes" class="view" role="tabpanel" tabindex="0" aria-labelledby="tab-recipes" data-view-panel="recipes" hidden>
-        <header class="page-heading"><div><h1 data-i18n="presets.title">色彩配方</h1><p class="summary-line" data-i18n="presets.help">管理实际参与渲染的饱和度、对比度和明暗枢轴参数。</p></div><button id="new-color-preset-btn" class="primary-button" type="button" data-i18n="presets.new">新建配方</button></header>
+        <header class="page-heading"><div><h1 data-i18n="presets.title">色彩配方</h1><p class="summary-line" data-i18n="presets.help">管理实际参与渲染的饱和度、对比度和明暗枢轴参数。</p></div></header>
         <div class="color-preset-workspace">
-          <div id="color-preset-list" class="color-preset-list" role="listbox" aria-label="色彩配方列表" data-i18n-aria-label="presets.list"></div>
+          <div class="color-preset-sidebar"><div class="color-preset-actions"><button id="new-color-preset-btn" class="primary-button" type="button" data-i18n="presets.new">新建配方</button></div><div id="color-preset-list" class="color-preset-list" role="listbox" aria-label="色彩配方列表" data-i18n-aria-label="presets.list"></div></div>
           <form id="color-preset-form" class="color-preset-form">
             <input id="color-preset-id" type="hidden">
             <div class="preset-form-heading"><h2 id="color-preset-editor-title" data-i18n="presets.editor">配方参数</h2><span id="color-preset-kind" class="status-pill"></span></div>
@@ -208,15 +248,15 @@
           </fieldset>
           <fieldset><legend data-i18n="settings.processing">处理</legend>
             <label for="settings-default-recipe"><span data-i18n="settings.default_recipe">默认配方</span><select id="settings-default-recipe" name="processing.default_recipe"><option value="natural" data-i18n="recipe.natural">自然</option></select></label>
+            <label for="settings-render-device"><span data-i18n="settings.render_device">RAW/JPEG 渲染设备</span><select id="settings-render-device" name="processing.render_device"><option value="auto" data-i18n="settings.device_auto">自动（推荐）</option><option value="cpu">CPU</option><option value="gpu">GPU</option></select></label>
             <label for="settings-gap-seconds"><span data-i18n="settings.gap">自动分段时间间隔（秒）</span><input id="settings-gap-seconds" name="scan.gap_seconds" type="number" min="1" value="120"></label>
-            <label for="settings-log-level"><span data-i18n="settings.log_level">日志级别</span><select id="settings-log-level" name="logging.level"><option value="INFO">INFO</option><option value="DEBUG">DEBUG</option></select><small data-i18n="settings.logging">DEBUG 会记录逐帧进度、处理参数和异常堆栈。</small></label>
           </fieldset>
           <fieldset><legend data-i18n="settings.preview">预览</legend>
             <label for="settings-preview-fps"><span data-i18n="settings.preview_fps">预览帧率</span><input id="settings-preview-fps" name="preview.fps" type="number" min="1" max="60" value="30"></label>
             <label for="settings-preview-width"><span data-i18n="settings.preview_width">预览宽度</span><input id="settings-preview-width" name="preview.width" type="number" min="640" max="3840" step="16" value="1920"></label>
           </fieldset>
           <fieldset><legend data-i18n="settings.export">导出</legend>
-            <label for="settings-export-resolution"><span data-i18n="export.resolution">分辨率</span><select id="settings-export-resolution" name="export.resolution"><option value="1080p">1080p</option><option value="4k">4K</option><option value="source" data-i18n="export.source_width">原图宽度</option></select></label>
+            <label for="settings-export-resolution"><span data-i18n="export.resolution">分辨率</span><select id="settings-export-resolution" name="export.resolution"><option value="1080p">1080p</option><option value="4k">4K</option><option value="original" data-i18n="export.source_width">原图宽度</option></select></label>
             <label for="settings-export-codec"><span data-i18n="export.codec">编码</span><select id="settings-export-codec" name="export.codec"><option value="h264">H.264</option><option value="h265">H.265</option></select></label>
             <label for="settings-export-crf"><span data-i18n="export.crf">CRF</span><input id="settings-export-crf" name="export.crf" type="number" min="0" max="51" value="18"></label>
           </fieldset>
@@ -235,9 +275,27 @@
       <div class="dialog-actions"><button id="directory-browser-cancel" type="button" data-i18n="dialog.cancel">取消</button><button id="directory-browser-choose" class="primary-button" type="button" data-i18n="browser.choose">选择当前目录</button></div>
     </div>
   </dialog>
-  <dialog id="archive-dialog" class="confirm-dialog" aria-labelledby="archive-dialog-title"><form method="dialog"><h2 id="archive-dialog-title" data-i18n="dialog.archive.title">确认归档当前分段</h2><p id="archive-dialog-message">归档会校验并复制当前分段及其 MP4 到归档目录，不会清理当前项目。</p><div class="dialog-actions"><button id="archive-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="archive-confirm-btn" class="primary-button" value="confirm" data-i18n="dialog.archive.confirm">确认归档</button></div></form></dialog>
-  <dialog id="export-progress-dialog" class="confirm-dialog export-progress-dialog" aria-labelledby="export-progress-title"><div class="export-progress-content"><h2 id="export-progress-title" data-i18n="dialog.export_progress.title">正在导出视频</h2><p id="export-progress-message" data-i18n="dialog.export_progress.preparing">正在准备当前分段，请稍候。</p><progress id="export-progress" role="progressbar" aria-label="视频导出进度" data-i18n-aria-label="dialog.export_progress.aria" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" max="100" value="0">0%</progress><div class="dialog-actions"><button id="export-progress-preview-btn" type="button" data-i18n="export.preview" hidden>预览视频</button><button id="export-progress-cancel-btn" class="danger-quiet-button" type="button" data-i18n="dialog.export_progress.cancel">取消导出</button><button id="export-progress-close-btn" class="primary-button" type="button" data-i18n="dialog.result.ok" hidden>确定</button></div></div></dialog>
-  <dialog id="operation-result-dialog" class="confirm-dialog" aria-labelledby="operation-result-title"><form method="dialog"><h2 id="operation-result-title">任务完成</h2><p id="operation-result-message" class="operation-result-message"></p><div class="dialog-actions"><button id="result-history-btn" type="button" data-i18n="dialog.result.history" hidden>查看历史归档</button><button id="result-ok-btn" class="primary-button" value="confirm" data-i18n="dialog.result.ok">确定</button></div></form></dialog>
-  <dialog id="clear-project-dialog" class="confirm-dialog" aria-labelledby="clear-dialog-title"><form method="dialog"><h2 id="clear-dialog-title" data-i18n="dialog.clear.title">清除当前项目</h2><p data-i18n="dialog.clear.body">只清除工作区中的当前项目状态和处理结果。源照片、输出视频和归档目录均不会删除，也不会自动归档。</p><div class="dialog-actions"><button id="clear-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="clear-confirm-btn" class="danger-button" value="confirm" data-i18n="dialog.clear.confirm">确认清除</button></div></form></dialog>
+  <dialog id="scan-progress-dialog" class="confirm-dialog scan-progress-dialog" aria-labelledby="scan-progress-title">
+    <div class="export-progress-content">
+      <h2 id="scan-progress-title" data-i18n="dialog.scan_progress.title">正在扫描素材</h2>
+      <p id="scan-progress-message" aria-live="polite" data-i18n="dialog.scan_progress.preparing">正在读取素材目录，请稍候。</p>
+      <div class="scan-progress-row">
+        <progress id="scan-progress" role="progressbar" aria-label="素材扫描进度" data-i18n-aria-label="dialog.scan_progress.aria" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" max="100" value="0">0%</progress>
+        <span id="scan-progress-percent">0%</span>
+      </div>
+      <div class="dialog-actions"><button id="scan-progress-cancel-btn" class="danger-quiet-button" type="button" data-i18n="dialog.scan_progress.cancel">取消扫描</button><button id="scan-progress-close-btn" class="primary-button" type="button" data-i18n="dialog.result.ok" hidden>确定</button></div>
+    </div>
+  </dialog>
+  <dialog id="exif-dialog" class="confirm-dialog exif-dialog" aria-labelledby="exif-dialog-title">
+    <div class="exif-dialog-content">
+      <div class="section-heading-row"><div><h2 id="exif-dialog-title" data-i18n="exif.title">EXIF 全部信息</h2><p id="exif-dialog-summary" class="summary-line" data-i18n="exif.loading">正在读取原始照片元数据…</p></div><button id="exif-dialog-close" class="icon-button" type="button" aria-label="关闭 EXIF 信息" data-i18n-aria-label="dialog.close">&#10005;</button></div>
+      <div class="exif-table-wrap"><table class="exif-table"><thead><tr><th data-i18n="exif.group">分组</th><th data-i18n="exif.tag">标签</th><th data-i18n="exif.value">值</th></tr></thead><tbody id="exif-table-body"></tbody></table><div id="exif-empty" class="empty-state" hidden data-i18n="exif.empty">没有可显示的 EXIF 标签</div></div>
+      <div class="dialog-actions"><button id="exif-dialog-ok" class="primary-button" type="button" data-i18n="dialog.close">关闭</button></div>
+    </div>
+  </dialog>
+  <dialog id="archive-dialog" class="confirm-dialog" aria-labelledby="archive-dialog-title"><form method="dialog"><h2 id="archive-dialog-title" data-i18n="dialog.archive.title">确认归档当前分段</h2><p id="archive-dialog-message">归档当前分段的原始照片和最终 MP4，不会归档处理后 JPG 或预览视频。</p><div class="dialog-actions"><button id="archive-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="archive-confirm-btn" class="primary-button" value="confirm" data-i18n="dialog.archive.confirm">确认归档</button></div></form></dialog>
+  <dialog id="export-progress-dialog" class="confirm-dialog export-progress-dialog" aria-labelledby="export-progress-title"><div class="export-progress-content"><h2 id="export-progress-title" data-i18n="dialog.export_progress.title">正在导出视频</h2><p id="export-progress-message" aria-live="polite" data-i18n="dialog.export_progress.preparing">正在准备当前分段，请稍候。</p><div class="export-progress-row"><progress id="export-progress" role="progressbar" aria-label="视频导出进度" data-i18n-aria-label="dialog.export_progress.aria" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" max="100" value="0">0%</progress><span id="export-progress-percent">0%</span></div><p id="export-progress-stats" class="export-progress-stats" aria-live="polite" data-i18n="dialog.export_progress.stats_preparing">正在读取帧信息。</p><div class="dialog-actions"><button id="export-progress-cancel-btn" class="danger-quiet-button" type="button" data-i18n="dialog.export_progress.cancel">取消导出</button><button id="export-progress-close-btn" class="primary-button" type="button" data-i18n="dialog.result.ok" hidden>确定</button></div></div></dialog>
+  <dialog id="archive-progress-dialog" class="confirm-dialog export-progress-dialog" aria-labelledby="archive-progress-title"><div class="export-progress-content"><h2 id="archive-progress-title" data-i18n="dialog.archive_progress.title">正在归档成果</h2><div id="archive-spinner" class="operation-spinner" role="status" aria-live="polite" aria-label="成果归档处理中" data-i18n-aria-label="dialog.archive_progress.aria"><span class="operation-spinner-mark" aria-hidden="true"></span><span id="archive-spinner-label" data-i18n="dialog.archive_progress.waiting">正在复制并校验原始照片，请等待。</span></div><p id="archive-progress-message" data-i18n="dialog.archive_progress.preparing">正在准备当前分段的原始照片和最终 MP4。</p><div class="dialog-actions"><button id="archive-progress-history-btn" type="button" data-i18n="dialog.result.history" hidden>查看历史归档</button><button id="archive-progress-cancel-btn" class="danger-quiet-button" type="button" data-i18n="dialog.archive_progress.cancel">取消归档</button><button id="archive-progress-close-btn" class="primary-button" type="button" data-i18n="dialog.result.ok" hidden>确定</button></div></div></dialog>
+  <dialog id="clear-project-dialog" class="confirm-dialog" aria-labelledby="clear-dialog-title"><form method="dialog"><h2 id="clear-dialog-title" data-i18n="dialog.clear.title">清除当前项目</h2><p data-i18n="dialog.clear.warning">以下目录中的当前项目数据将被永久删除：</p><ul class="clear-directory-list"><li><span data-i18n="dialog.clear.workspace">当前项目工作区</span><strong id="clear-workspace-path" class="clear-danger-path">workspace/current</strong></li><li><span data-i18n="dialog.clear.output">输出目录（包括尚未归档的视频）</span><strong id="clear-output-path" class="clear-danger-path">output</strong></li></ul><p class="clear-preserved-note"><span data-i18n="dialog.clear.preserved">源照片不会删除。归档目录中的成果保持不变：</span><strong id="clear-archive-path">archive</strong></p><p class="clear-final-warning" data-i18n="dialog.clear.irreversible">此操作不会自动归档，且无法撤销。</p><div class="dialog-actions"><button id="clear-cancel-btn" value="cancel" data-i18n="dialog.cancel">取消</button><button id="clear-confirm-btn" class="danger-button" value="confirm" data-i18n="dialog.clear.confirm">确认清除</button></div></form></dialog>
 </body>
 </html>

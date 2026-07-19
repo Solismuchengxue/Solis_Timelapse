@@ -20,6 +20,7 @@ class WebUiStaticContractTests(unittest.TestCase):
         cls.html = HTML_PATH.read_text(encoding="utf-8")
         cls.js = JS_PATH.read_text(encoding="utf-8")
         cls.css = CSS_PATH.read_text(encoding="utf-8")
+        cls.prefs = PREFS_PATH.read_text(encoding="utf-8")
         cls.server = SERVER_PATH.read_text(encoding="utf-8")
         cls.run_bat = RUN_PATH.read_text(encoding="utf-8")
 
@@ -51,19 +52,26 @@ class WebUiStaticContractTests(unittest.TestCase):
             "segment-multi-select-btn", "move-up-btn", "move-down-btn",
             "process-current-btn", "cancel-btn", "output-flyout",
             "task-progress", "task-log", "export-btn", "archive-btn",
-            "history-list", "clear-logs-btn", "settings-form", "save-settings-btn",
+            "history-list", "delete-all-history-btn", "clear-logs-btn", "settings-form", "save-settings-btn",
             "color-preset-list", "color-preset-form", "new-color-preset-btn",
             "save-color-preset-btn", "delete-color-preset-btn", "preview-histogram",
-            "settings-save-status", "operation-result-dialog",
-            "operation-result-title", "operation-result-message", "result-history-btn",
+            "settings-save-status", "archive-progress-dialog", "archive-spinner",
+            "archive-progress-cancel-btn", "archive-progress-close-btn", "archive-progress-history-btn",
             "preview-video-btn", "export-progress-dialog", "export-progress",
+            "export-progress-percent", "export-progress-stats",
             "export-progress-cancel-btn", "export-progress-close-btn",
+            "scan-progress-dialog", "scan-progress", "scan-progress-percent",
+            "scan-progress-cancel-btn", "scan-progress-close-btn",
+            "preview-caption", "exif-dialog", "exif-table-body", "exif-dialog-close",
+            "hdr-send-btn", "hdr-form", "hdr-frame-list", "hdr-preview",
+            "hdr-start-btn", "hdr-cancel-btn", "hdr-download-btn",
+            "settings-render-device",
         }
         present = set(re.findall(r'\bid="([^"]+)"', self.html))
         self.assertEqual(set(), required_ids - present)
 
-    def test_four_named_views_and_accessible_controls_exist(self):
-        for label in ("工作台", "处理历史与日志", "色彩配方", "设置"):
+    def test_five_named_views_and_accessible_controls_exist(self):
+        for label in ("工作台", "HDR 合成", "归档与日志", "色彩配方", "设置"):
             self.assertIn(f">{label}</button>", self.html)
         self.assertNotIn('data-view="logs"', self.html)
         self.assertIn('aria-label="分段列表"', self.html)
@@ -73,8 +81,8 @@ class WebUiStaticContractTests(unittest.TestCase):
 
     def test_tabs_and_progress_expose_complete_aria_state(self):
         self.assertIn('role="tablist"', self.html)
-        self.assertEqual(4, len(re.findall(r'role="tab"', self.html)))
-        self.assertEqual(4, len(re.findall(r'role="tabpanel"', self.html)))
+        self.assertEqual(5, len(re.findall(r'role="tab"', self.html)))
+        self.assertEqual(5, len(re.findall(r'role="tabpanel"', self.html)))
         self.assertIn('tabindex="-1"', self.html)
         for attribute in ('role="progressbar"', 'aria-valuemin="0"',
                           'aria-valuemax="100"', 'aria-valuenow="0"'):
@@ -96,16 +104,19 @@ class WebUiStaticContractTests(unittest.TestCase):
             "/api/segments/", "/api/segments/reorder", "/api/process",
             "/api/process/retry", "/api/tasks/cancel", "/api/tasks/current",
             "/api/logs", "/api/export", "/api/archive", "/api/history", "/api/settings",
+            "/api/hdr",
             "/frames/", "/video",
         )
         for route in routes:
             with self.subTest(route=route):
                 self.assertIn(route, self.js)
 
-    def test_frontend_polls_tasks_and_pages_thumbnails(self):
+    def test_frontend_polls_tasks_and_loads_all_thumbnails_once(self):
         self.assertRegex(self.js, r"setInterval\(pollTask,\s*1000\)")
-        self.assertIn("const PAGE_SIZE = 20", self.js)
-        self.assertIn("thumbnailPage", self.js)
+        self.assertIn("api(API.thumbnails(segmentId))", self.js)
+        self.assertNotIn("loadMoreThumbnails", self.js)
+        self.assertNotIn('byId("frame-strip").addEventListener("scroll"', self.js)
+        self.assertNotIn('class="frame-pagination"', self.html)
         self.assertIn("API.historyItem(timestamp)", self.js)
         self.assertIn("showModal()", self.js)
 
@@ -127,6 +138,28 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("currentSegmentIdsForAction()", archive_body)
         self.assertNotIn("selectedSegmentIds", export_body + archive_body)
 
+    def test_workflow_buttons_follow_render_cancel_preview_export_archive_order(self):
+        row = re.search(r'<div class="workflow-action-row">(.*?)</div>', self.html, re.DOTALL)
+        self.assertIsNotNone(row)
+        body = row.group(1)
+        ordered = ["process-current-btn", "cancel-btn", "preview-video-btn", "export-btn", "archive-btn"]
+        positions = [body.index(f'id="{item}"') for item in ordered]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_archive_has_dedicated_cancellable_waiting_dialog(self):
+        for required_id in (
+            "archive-progress-dialog",
+            "archive-spinner",
+            "archive-progress-cancel-btn",
+            "archive-progress-close-btn",
+            "archive-progress-history-btn",
+        ):
+            self.assertIn(f'id="{required_id}"', self.html)
+        self.assertIn("state.archiveDialogOpen", self.js)
+        self.assertIn("updateArchiveProgressDialog", self.js)
+        self.assertIn('byId("archive-progress-cancel-btn").addEventListener("click", cancelTask)', self.js)
+        self.assertIn('["analyze", "render"].includes(state.task?.kind)', self.js)
+
     def test_segment_multi_select_is_only_a_merge_mode(self):
         self.assertIn('data-i18n="segment.merge_select">选择要合并分段</button>', self.html)
         self.assertIn('class="merge-actions"', self.html)
@@ -146,13 +179,35 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn('byId("app").dataset.activeView = viewName', self.js)
         self.assertIn('.studio-shell:not([data-active-view="workbench"]) .segments-pane', self.css)
 
-    def test_export_progress_dialog_supports_cancel_and_preview(self):
+    def test_export_dialog_uses_real_progress_and_supports_cancel(self):
         self.assertIn('id="export-progress-dialog"', self.html)
+        self.assertIn('id="export-progress"', self.html)
+        self.assertIn('id="export-progress-percent"', self.html)
+        self.assertIn('id="export-progress-stats"', self.html)
         self.assertIn('id="export-progress-cancel-btn"', self.html)
         self.assertIn('id="preview-video-btn"', self.html)
+        self.assertNotIn('id="export-spinner"', self.html)
+        self.assertNotIn('id="export-progress-preview-btn"', self.html)
         self.assertIn("updateExportDialog", self.js)
         self.assertIn("cancelTask", self.js)
-        self.assertIn("previewCurrentVideo", self.js)
+
+    def test_directory_selection_auto_scans_with_dedicated_real_progress(self):
+        self.assertIn('data-i18n="source.rescan">重新扫描</button>', self.html)
+        for required_id in (
+            "scan-progress-dialog",
+            "scan-progress",
+            "scan-progress-percent",
+            "scan-progress-cancel-btn",
+            "scan-progress-close-btn",
+        ):
+            self.assertIn(f'id="{required_id}"', self.html)
+        self.assertIn('state.scanDialogOpen', self.js)
+        self.assertIn('await scanSource()', self.js)
+        self.assertIn('busy || !state.pendingSourcePath', self.js)
+        self.assertIn('const workflowTask = task.kind === "scan"', self.js)
+        self.assertIn('updateScanDialog', self.js)
+        self.assertIn('progress.value = percent', self.js)
+        self.assertIn('progress.setAttribute("aria-valuenow", String(percent))', self.js)
 
     def test_mobile_source_commands_precede_segments_and_recipe_follows_frames(self):
         self.assertLess(self.html.index('id="source-band"'), self.html.index('id="sidebar-nav"'))
@@ -169,7 +224,7 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertLess(inspector_html.index('class="chart-panel"'), inspector_html.index('class="frame-band"'))
         self.assertLess(inspector_html.index('class="frame-band"'), inspector_html.index('class="recipe-panel"'))
         self.assertLess(self.html.index('class="preview-stage"'), self.html.index('id="output-flyout"'))
-        self.assertIn('<details id="output-flyout" class="output-flyout"', self.html)
+        self.assertIn('<details id="output-flyout" class="output-flyout" aria-labelledby="output-heading" open>', self.html)
         self.assertIn('<summary class="output-summary">', self.html)
         self.assertIn('data-i18n="task.start_current">渲染</button>', self.html)
         self.assertIn('.output-flyout { position: absolute;', self.css)
@@ -181,10 +236,22 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn('.chart-panel:not([open]) #brightness-chart { display: none; }', self.css)
         self.assertIn('<details class="frame-band"', self.html)
         self.assertIn('<details class="recipe-panel"', self.html)
+        self.assertIn('<section id="advanced-settings" class="advanced-settings"', self.html)
+        self.assertNotIn('<details id="advanced-settings"', self.html)
         self.assertIn('.frame-band:not([open]) .frame-panel-content', self.css)
         self.assertIn('.recipe-panel:not([open]) .recipe-panel-content', self.css)
-        self.assertIn('grid-template-columns: repeat(5, minmax(72px, 1fr))', self.css)
+        self.assertIn('grid-template-columns: repeat(4, minmax(72px, 1fr))', self.css)
+        self.assertIn('grid-auto-rows: max-content', self.css)
+        self.assertIn('.frame-thumb { position: relative; aspect-ratio: 4 / 3;', self.css)
+        self.assertIn('.frame-thumb img { width: 100%; height: 100%; object-fit: contain;', self.css)
         self.assertIn('.segment-item:hover:not(:disabled)', self.css)
+
+    def test_recipe_selector_and_deflicker_toggle_share_compact_top_alignment(self):
+        self.assertIn('class="recipe-select-field"', self.html)
+        self.assertIn('aria-label="配方预设" data-i18n-aria-label="recipe.mode"', self.html)
+        self.assertNotIn('<span data-i18n="recipe.mode">配方预设</span>', self.html)
+        self.assertIn('.recipe-select-field { align-self: start; }', self.css)
+        self.assertIn('.deflicker-toggle { align-self: start; min-height: 32px;', self.css)
 
     def test_sidebar_split_and_export_controls_use_compact_order(self):
         self.assertIn('grid-template-columns: 250px minmax(0, 1fr)', self.css)
@@ -202,10 +269,37 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn('className = "segment-item-heading"', self.js)
         self.assertIn('className = "segment-item-status"', self.js)
         self.assertIn('.segment-item-heading { display: flex;', self.css)
-        self.assertIn('.frame-band[open] { display: flex; flex: 1 1 230px;', self.css)
+        self.assertIn('.frame-band[open] { position: relative; display: flex; flex: 1 1 230px;', self.css)
         self.assertIn('.recipe-panel[open] { flex: 0 0 auto;', self.css)
-        self.assertIn('grid-template-rows: repeat(4, minmax(48px, 1fr))', self.css)
+        self.assertNotIn('grid-auto-rows: calc((100% - 15px) / 4)', self.css)
+        self.assertNotIn('.frame-thumb { height: 88px; min-height: 88px; }', self.css)
+        self.assertNotIn('.frame-thumb { min-height: 35px; }', self.css)
+        self.assertIn('overflow-y: auto', self.css)
         self.assertIn('#frame-multi-select-btn:hover:not(:disabled)', self.css)
+
+    def test_segment_status_tracks_export_and_archive_lifecycle(self):
+        self.assertIn("function segmentWorkflowStatus(segment)", self.js)
+        self.assertIn("segment?.archive_artifact", self.js)
+        self.assertIn("segment?.export_artifact", self.js)
+        self.assertIn('"status.exported"', self.prefs)
+        self.assertIn('"status.archived"', self.prefs)
+        self.assertIn("!segment?.export_artifact", self.js)
+        self.assertIn("Boolean(segment?.archive_artifact)", self.js)
+
+    def test_segment_cards_show_capture_metadata_in_requested_order(self):
+        render_body = re.search(r"function renderSegments\(\) \{(.*?)\n\}", self.js, re.DOTALL)
+        self.assertIsNotNone(render_body)
+        ordered_keys = [
+            "segment.meta_frame_focal",
+            "segment.meta_date_time",
+            "segment.meta_exposure",
+            "segment.meta_location",
+        ]
+        positions = [render_body.group(1).index(key) for key in ordered_keys]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('"segment.meta_time": "拍摄时间：', self.prefs)
+        self.assertNotIn('"segment.meta_location": "拍摄位置：', self.prefs)
+        self.assertIn('height: auto; min-height: 0; overflow: visible;', self.css)
 
     def test_history_logs_are_combined_and_color_presets_are_editable(self):
         history = re.search(r'<section id="view-history"(.*?)</section>\s*<section id="view-recipes"', self.html, re.DOTALL)
@@ -213,6 +307,8 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn('id="history-list"', history.group(1))
         self.assertIn('id="task-log"', history.group(1))
         self.assertIn('id="clear-logs-btn"', history.group(1))
+        self.assertIn('id="delete-all-history-btn"', history.group(1))
+        self.assertIn('id="settings-log-level"', history.group(1))
         self.assertIn('id="color-preset-form"', self.html)
         for field in ("color-preset-name", "color-preset-sat", "color-preset-con", "color-preset-pivot"):
             self.assertIn(f'id="{field}"', self.html)
@@ -221,6 +317,7 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("async function deleteColorPreset", self.js)
         self.assertNotIn('id="recipe-mode"', self.html)
         self.assertNotIn('data-recipe=', self.html)
+        self.assertIn('class="color-preset-sidebar"', self.html)
 
     def test_preview_has_real_histogram_overlay(self):
         self.assertIn('id="preview-histogram-panel"', self.html)
@@ -232,6 +329,20 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn(".preview-histogram-panel { position: absolute;", self.css)
         self.assertIn(".preview-histogram-panel:not([open])", self.css)
 
+    def test_frame_preview_shows_capture_metadata_and_full_exif_dialog(self):
+        for key in (
+            "preview.focal",
+            "preview.aperture",
+            "preview.shutter",
+            "preview.location",
+            "preview.exposure_bias",
+        ):
+            self.assertIn(f't("{key}"', self.js)
+        self.assertIn("API.frameExif(segment.id, frameIndex)", self.js)
+        self.assertIn('button.id = "preview-exif-btn"', self.js)
+        self.assertIn('class="confirm-dialog exif-dialog"', self.html)
+        self.assertIn(".exif-table th { position: sticky;", self.css)
+
     def test_video_chart_supports_multiple_metric_views(self):
         self.assertIn('data-i18n="chart.title">视频图表</span>', self.html)
         self.assertIn('id="chart-type-select"', self.html)
@@ -242,8 +353,19 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn('byId("chart-type-select").addEventListener("change", drawChart)', self.js)
         self.assertIn('t(`chart.legend.${chartType}`)', self.js)
 
+    def test_original_resolution_controls_use_backend_canonical_value(self):
+        self.assertEqual(2, self.html.count('value="original" data-i18n="export.source_width"'))
+        self.assertNotIn('value="source" data-i18n="export.source_width"', self.html)
+
+    def test_export_dialog_has_real_progress_controls(self):
+        self.assertIn('id="export-progress"', self.html)
+        self.assertIn('id="export-progress-percent"', self.html)
+        self.assertIn('id="export-progress-stats"', self.html)
+        self.assertNotIn('id="export-spinner"', self.html)
+        self.assertIn('dialog.export_progress.h264_oversize', self.js)
+
     def test_desktop_frame_thumbnails_are_wider_and_show_full_names(self):
-        self.assertIn('grid-template-columns: minmax(400px, 480px)', self.css)
+        self.assertIn('grid-template-columns: minmax(420px, 520px)', self.css)
         self.assertIn('max-width: calc(100% - 6px)', self.css)
         self.assertIn('font-size: 10px', self.css)
         self.assertIn('top: 50%', self.css)
@@ -251,7 +373,8 @@ class WebUiStaticContractTests(unittest.TestCase):
     def test_frame_toolbar_groups_selection_actions_beside_heading(self):
         self.assertIn('class="rail-panel-summary frame-summary"', self.html)
         self.assertIn('class="frame-selection-actions"', self.html)
-        self.assertIn('class="frame-pagination"', self.html)
+        self.assertNotIn('class="frame-pagination"', self.html)
+        self.assertIn("overflow-y: auto", self.css)
         self.assertIn("background: var(--surface)", self.css)
 
     def test_recipe_is_flushed_before_processing_and_export(self):
@@ -267,6 +390,23 @@ class WebUiStaticContractTests(unittest.TestCase):
             self.assertLess(body.index("await flushRecipeSave()"),
                             body.index("await startOperation("))
 
+    def test_operation_error_routing_is_owned_by_start_operation(self):
+        start_match = re.search(
+            r"async function startOperation\([^)]*\) \{(.*?)\n\}",
+            self.js,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(start_match)
+        self.assertIn("options.showError === false", start_match.group(1))
+
+        process_match = re.search(
+            r"async function processCurrentSegment\([^)]*\) \{(.*?)\n\}",
+            self.js,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(process_match)
+        self.assertNotIn("options.showError", process_match.group(1))
+
     def test_rejected_frames_use_stable_source_identifiers(self):
         self.assertIn("function frameStableId(frame, index)", self.js)
         self.assertIn("segment?.source_files?.[index]", self.js)
@@ -280,28 +420,85 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("entry.timestamp || entry.created_at || entry.archived_at", self.js)
         self.assertIn("function recipeSummary(entry)", self.js)
         self.assertIn('recipes.textContent = t("history.recipe"', self.js)
+        self.assertIn("function historyCaptureSummary(entry)", self.js)
+        self.assertIn('className = "history-delete-button"', self.js)
+        self.assertIn('className = "history-media-link"', self.js)
+        self.assertIn("async function deleteHistoryEntry", self.js)
+        self.assertIn("async function deleteAllHistory", self.js)
+        self.assertIn("function potPlayerUrl", self.js)
+        self.assertIn("link.href = potPlayerUrl", self.js)
+        for function_name in ("deleteHistoryEntry", "deleteAllHistory"):
+            start = self.js.index(f"async function {function_name}")
+            body = self.js[start:self.js.index("\n}", start)]
+            self.assertIn("refreshState()", body)
+        self.assertIn('.history-media-link::before { content: "\\25B6"', self.css)
 
-    def test_history_detail_preserves_summary_media_urls(self):
+    def test_history_detail_preserves_only_final_video_urls(self):
         self.assertIn("async function loadHistoryDetail(summary)", self.js)
         self.assertIn("function normaliseHistoryMedia(summary, manifest)", self.js)
-        self.assertIn("summary.previews || summary.preview_videos", self.js)
-        self.assertIn("manifest.previews || manifest.preview_videos", self.js)
         self.assertIn("summary.outputs || summary.final_videos", self.js)
         self.assertIn("manifest.outputs || manifest.final_videos", self.js)
+        self.assertNotIn('appendMediaLinks(media, t("history.preview")', self.js)
         self.assertIn("mergeMediaItems", self.js)
 
-    def test_history_jpeg_count_prefers_segment_manifest_counts(self):
+    def test_workbench_video_caption_prefers_render_preview(self):
+        self.assertIn(
+            'segment?.preview_file ? t("history.preview") : t("history.output")',
+            self.js,
+        )
+
+    def test_history_original_count_prefers_segment_manifest_counts(self):
         match = re.search(
-            r"function historyJpegCount\(entry\) \{(.*?)\n\}",
+            r"function historyOriginalCount\(entry\) \{(.*?)\n\}",
             self.js,
             re.DOTALL,
         )
         self.assertIsNotNone(match)
         body = match.group(1)
-        self.assertIn("segment.jpeg_count", body)
+        self.assertIn("segment.source_file_count", body)
         self.assertIn("segmentCounts.reduce", body)
-        self.assertIn("entry.jpeg_count ?? entry.frame_count ?? 0", body)
-        self.assertIn("historyJpegCount(entry)", self.js)
+        self.assertIn("entry.source_file_count", body)
+        self.assertIn("historyOriginalCount(entry)", self.js)
+
+    def test_history_shows_first_and_last_source_filenames(self):
+        self.assertIn("function historyFileRanges(entry)", self.js)
+        self.assertIn("segment.first_file", self.js)
+        self.assertIn("segment.last_file", self.js)
+        self.assertIn("segment.originals", self.js)
+        self.assertIn('t("history.file_range"', self.js)
+        self.assertIn('"history.file_range"', self.prefs)
+
+    def test_archive_history_has_an_independent_scroll_container(self):
+        self.assertIn(
+            '#view-history.is-active { display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }',
+            self.css,
+        )
+        self.assertIn('scrollbar-gutter: stable', self.css)
+        self.assertIn('overscroll-behavior: contain', self.css)
+        self.assertIn('.history-list, .log-console { max-height: min(55vh, 520px); overflow-y: auto; }', self.css)
+
+    def test_archive_history_and_task_logs_are_independently_collapsible(self):
+        for heading_id, toggle_id, content_id in (
+            ("archive-history-bar", "archive-history-toggle", "history-list"),
+            ("task-log-bar", "task-log-toggle", "task-log-content"),
+        ):
+            self.assertIn(f'id="{heading_id}"', self.html)
+            self.assertIn(f'id="{toggle_id}"', self.html)
+            self.assertIn(f'aria-controls="{content_id}"', self.html)
+            self.assertIn('aria-expanded="true"', self.html)
+        self.assertIn('id="task-log-content"', self.html)
+        self.assertIn('function toggleHistoryRegion(toggleId, contentId)', self.js)
+        self.assertIn('function bindHistoryRegionToggle(headingId, toggleId, contentId)', self.js)
+        self.assertIn('.region-heading.is-collapsible', self.css)
+        self.assertIn('.task-log-content[hidden]', self.css)
+        self.assertLess(
+            self.html.index('class="log-level-help"'),
+            self.html.index('id="task-log-content"'),
+        )
+        self.assertIn('column-gap: 1px', self.css)
+        self.assertIn('background: var(--line)', self.css)
+        self.assertIn('.history-region.is-collapsed, .logs-region.is-collapsed', self.css)
+        self.assertIn('.region-collapse-toggle[aria-expanded="false"] .disclosure-icon', self.css)
 
     def test_settings_paths_are_read_only_picker_controls(self):
         for purpose in ("workspace", "output", "archive"):
@@ -311,18 +508,28 @@ class WebUiStaticContractTests(unittest.TestCase):
             )
             self.assertIn(f'data-settings-directory="{purpose}"', self.html)
 
+    def test_settings_expose_render_device_selection(self):
+        self.assertIn('id="settings-render-device"', self.html)
+        for value in ("auto", "cpu", "gpu"):
+            self.assertIn(f'<option value="{value}"', self.html)
+        self.assertIn('settings.processing?.render_device || "auto"', self.js)
+        self.assertIn('render_device: byId("settings-render-device").value', self.js)
+
     def test_restart_required_settings_response_has_explicit_notice(self):
         self.assertIn('id="settings-save-status"', self.html)
         self.assertIn('role="status"', self.html)
         self.assertIn("payload.restart_required", self.js)
         self.assertIn('t("settings.saved_restart")', self.js)
 
-    def test_settings_include_runtime_log_level(self):
-        self.assertIn('id="settings-log-level"', self.html)
-        self.assertIn('name="logging.level"', self.html)
+    def test_history_page_contains_runtime_log_level(self):
+        history = re.search(r'<section id="view-history"(.*?)</section>\s*<section id="view-recipes"', self.html, re.DOTALL)
+        settings = re.search(r'<section id="view-settings"(.*?)</section>', self.html, re.DOTALL)
+        self.assertIn('id="settings-log-level"', history.group(1))
+        self.assertNotIn('id="settings-log-level"', settings.group(1))
         self.assertIn('data-i18n="settings.logging"', self.html)
         self.assertIn('data-i18n="settings.log_level"', self.html)
-        self.assertIn('byId("settings-log-level")', self.js)
+        self.assertIn("async function saveLogLevel", self.js)
+        self.assertIn('byId("settings-log-level").addEventListener("change", saveLogLevel)', self.js)
 
     def test_layout_contract_is_desktop_first_and_responsive(self):
         self.assertIn("grid-template-columns: 250px minmax(0, 1fr)", self.css)
@@ -354,6 +561,21 @@ class WebUiStaticContractTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, self.server)
         self.assertNotIn("Sony 延时摄影", self.run_bat + self.server)
+
+    def test_clear_project_dialog_emphasizes_deleted_directories(self):
+        for required_id in (
+            "clear-workspace-path",
+            "clear-output-path",
+            "clear-archive-path",
+        ):
+            self.assertIn(f'id="{required_id}"', self.html)
+        self.assertGreaterEqual(self.html.count('class="clear-danger-path"'), 2)
+        self.assertIn(".clear-danger-path", self.css)
+        self.assertIn("font-weight: 700", self.css)
+        self.assertIn("color: var(--danger)", self.css)
+        self.assertIn("function openClearProjectDialog()", self.js)
+        self.assertIn('payload.cleanup_targets', self.js)
+        self.assertIn('state.task = { status: "idle", completed: 0, total: 0', self.js)
 
     def test_user_documentation_covers_windows_and_fnos_deployment(self):
         readme = README_PATH.read_text(encoding="utf-8")

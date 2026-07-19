@@ -20,9 +20,17 @@ DEFAULTS = {
     "logging": {"level": "INFO"},
     "scan": {"gap_seconds": 120},
     "preview": {"fps": 30, "width": 1920},
-    "export": {"fps": 30, "resolution": "4k", "codec": "h264", "crf": 18},
+    "export": {
+        "fps": 30,
+        "resolution": "4k",
+        "codec": "h264",
+        "crf": 18,
+        "hardware_acceleration": "auto",
+    },
     "processing": {
         "jpeg_quality": 95,
+        "render_workers": 0,
+        "render_device": "auto",
         "default_recipe": "natural",
         "color_presets": {
             "natural": {"name": "自然", "sat": 1.20, "con": 1.12, "pivot": 118.0},

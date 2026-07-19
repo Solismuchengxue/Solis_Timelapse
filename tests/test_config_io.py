@@ -61,6 +61,11 @@ class ConfigIoTests(unittest.TestCase):
             self.assertEqual({"name", "sat", "con", "pivot"}, set(preset))
         self.assertNotEqual(presets["clear"], presets["custom"])
 
+    def test_acceleration_defaults_are_automatic(self):
+        self.assertEqual(config_io.DEFAULTS["processing"]["render_workers"], 0)
+        self.assertEqual(config_io.DEFAULTS["processing"]["render_device"], "auto")
+        self.assertEqual(config_io.DEFAULTS["export"]["hardware_acceleration"], "auto")
+
 
 if __name__ == "__main__":
     unittest.main()

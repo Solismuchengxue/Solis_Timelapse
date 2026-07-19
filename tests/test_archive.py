@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,6 +44,12 @@ class ArchiveTests(unittest.TestCase):
                     "name": "日照:金山",
                     "frames": [str(path) for path in self.source_files],
                     "recipe": {"grade": "natural"},
+                    "focal_length": 70.0,
+                    "captured_start": "2026-05-07T06:10:00",
+                    "captured_end": "2026-05-07T06:55:03",
+                    "capture_date": "2026-05-07",
+                    "capture_time": "06:10:00–06:55:03",
+                    "location": "27.102345°N, 100.175678°E",
                 }
             ],
         }
@@ -55,7 +62,7 @@ class ArchiveTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_archive_contains_contract_and_keeps_source_and_output(self):
+    def test_archive_contains_original_files_and_final_video_without_processed_jpegs_or_preview(self):
         source_hashes = {path.name: digest(path) for path in self.source_files}
         output_hash = digest(self.final_video)
 
@@ -68,19 +75,37 @@ class ArchiveTests(unittest.TestCase):
         )
 
         self.assertEqual(destination.name, "2026-07-15_120000")
-        self.assertTrue((destination / "project.json").is_file())
+        self.assertFalse((destination / "project.json").exists())
         segment = destination / "日照_金山"
         self.assertTrue((segment / "recipe.json").is_file())
         self.assertTrue((segment / "analysis.json").is_file())
-        self.assertEqual(len(list(segment.glob("*.jpg"))), 2)
-        self.assertTrue((destination / "日照_金山_preview.mp4").is_file())
+        self.assertEqual((segment / "originals" / "a.jpg").read_bytes(), b"source-jpeg")
+        self.assertEqual((segment / "originals" / "b.arw").read_bytes(), b"source-raw")
+        self.assertFalse((segment / "000001.jpg").exists())
+        self.assertFalse((destination / "日照_金山_preview.mp4").exists())
         self.assertTrue((destination / "output" / self.final_video.name).is_file())
         manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["source_file_count"], 2)
-        self.assertEqual(manifest["segments"][0]["jpeg_count"], 2)
-        self.assertEqual(manifest["media"]["previews"], ["日照_金山_preview.mp4"])
+        self.assertEqual(manifest["segments"][0]["source_file_count"], 2)
+        self.assertEqual(manifest["segments"][0]["first_file"], "a.jpg")
+        self.assertEqual(manifest["segments"][0]["last_file"], "b.arw")
+        self.assertEqual(manifest["segments"][0]["focal_length"], 70.0)
+        self.assertEqual(manifest["segments"][0]["capture_date"], "2026-05-07")
+        self.assertEqual(manifest["segments"][0]["capture_time"], "06:10:00–06:55:03")
+        self.assertEqual(manifest["segments"][0]["location"], "27.102345°N, 100.175678°E")
+        self.assertEqual(
+            manifest["segments"][0]["originals"],
+            ["日照_金山/originals/a.jpg", "日照_金山/originals/b.arw"],
+        )
+        self.assertNotIn("previews", manifest["media"])
         self.assertEqual(manifest["media"]["outputs"], ["output/日照金山.mp4"])
+
+        archived_hashes = {
+            path.name: digest(path)
+            for path in (segment / "originals").iterdir()
+        }
+        self.assertEqual(archived_hashes, source_hashes)
 
         self.assertEqual(list(self.workspace.iterdir()), [])
         self.assertEqual({path.name: digest(path) for path in self.source_files}, source_hashes)
@@ -136,6 +161,56 @@ class ArchiveTests(unittest.TestCase):
         self.assertFalse((destination / "output" / "other.mp4").exists())
         self.assertTrue((self.workspace / "project.json").is_file())
         self.assertTrue((self.workspace / "segments" / "seg-2" / "result" / "000001.jpg").is_file())
+
+    def test_cancelled_archive_removes_temporary_copy_and_keeps_workspace(self):
+        class CancelledForTest(RuntimeError):
+            pass
+
+        checks = 0
+
+        def check_cancelled():
+            nonlocal checks
+            checks += 1
+            if checks >= 3:
+                raise CancelledForTest("cancelled")
+
+        with self.assertRaises(CancelledForTest):
+            archive_project(
+                self.project,
+                self.workspace,
+                self.output,
+                self.archive,
+                timestamp="2026-07-15_120011",
+                check_cancelled=check_cancelled,
+            )
+
+        self.assertFalse((self.archive / "2026-07-15_120011").exists())
+        self.assertFalse(any(path.name.startswith(".archiving-") for path in self.archive.iterdir()))
+        self.assertTrue((self.workspace / "project.json").is_file())
+
+    def test_automatic_archive_name_never_overwrites_same_second_archive(self):
+        fixed = datetime(2026, 7, 19, 10, 30, 45).astimezone()
+        with patch("src.archive.datetime") as clock:
+            clock.now.return_value = fixed
+            first = archive_project(
+                self.project,
+                self.workspace,
+                self.output,
+                self.archive,
+                clear_workspace=False,
+            )
+            second = archive_project(
+                self.project,
+                self.workspace,
+                self.output,
+                self.archive,
+                clear_workspace=False,
+            )
+
+        self.assertEqual(first.name, "2026-07-19_103045")
+        self.assertEqual(second.name, "2026-07-19_103045_02")
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
 
     def test_workspace_cannot_contain_output_or_archive(self):
         with self.assertRaises(ValueError):

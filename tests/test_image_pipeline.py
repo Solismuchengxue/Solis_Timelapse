@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -249,6 +250,60 @@ class ImagePipelineTests(unittest.TestCase):
         self.assertEqual(len(output_names), 7)
         self.assertEqual(before, {path: _digest(path) for path in self.frames})
 
+    def test_render_workers_process_frames_concurrently_without_losing_outputs(self):
+        analysis = self._analysis_for()
+        recipe = {**self.recipe, "render_workers": 4}
+        target = self.root / "parallel-render-target"
+        barrier = threading.Barrier(4)
+        thread_ids = set()
+        lock = threading.Lock()
+        real_load = image_ops.load_image
+
+        def concurrent_load(path, decode=None, half=False):
+            with lock:
+                thread_ids.add(threading.get_ident())
+            barrier.wait(timeout=2)
+            return real_load(path, decode, half)
+
+        with mock.patch("src.image_pipeline.load_image", side_effect=concurrent_load):
+            result = image_pipeline.render_segment(
+                self.segment,
+                recipe,
+                analysis,
+                target,
+                lambda *args, **kwargs: None,
+                lambda: False,
+            )
+
+        self.assertGreaterEqual(len(thread_ids), 4)
+        self.assertEqual(result.frame_count, len(self.frames))
+        self.assertEqual(len(list((target / "result").glob("*.jpg"))), len(self.frames))
+
+    def test_auto_render_device_uses_gpu_only_for_golden_processing(self):
+        with mock.patch("src.image_pipeline.resolve_render_device", return_value="gpu") as resolve:
+            self.assertEqual(
+                image_pipeline.render_device({"render_device": "auto"}), "cpu"
+            )
+            self.assertEqual(
+                image_pipeline.render_device(
+                    {
+                        "render_device": "auto",
+                        "enhance_golden": {"enable": True, "strength": 1.2},
+                    }
+                ),
+                "gpu",
+            )
+
+        resolve.assert_called_once_with("auto")
+
+    def test_auto_cpu_workers_scale_to_eight_on_twenty_threads(self):
+        with mock.patch("src.image_pipeline.os.cpu_count", return_value=20):
+            workers = image_pipeline.render_worker_count(
+                {"render_workers": 0, "render_device": "cpu"}, 100
+            )
+
+        self.assertEqual(workers, 8)
+
     def test_duplicate_names_from_different_directories_render_once_in_stable_order(self):
         first_dir = self.source / "first"
         second_dir = self.source / "second"
@@ -367,30 +422,75 @@ class ImagePipelineTests(unittest.TestCase):
         target = self.root / "order-target"
         calls = []
 
-        def gain(rgb, value):
-            calls.append(("gain", value))
+        def adjustments(
+            rgb, gain, style, overrides, golden, device, output_uint8=False
+        ):
+            calls.append((gain, style, golden, device, output_uint8))
             return rgb
 
-        def grade(rgb, style, overrides=None):
-            calls.append(("grade", style))
-            return rgb
-
-        def golden(rgb, strength):
-            calls.append(("golden", strength))
-            return rgb
-
-        with (
-            mock.patch("src.image_pipeline.apply_gain", side_effect=gain),
-            mock.patch("src.image_pipeline.grade_by_style", side_effect=grade),
-            mock.patch("src.image_pipeline.enhance_golden", side_effect=golden),
+        with mock.patch(
+            "src.image_pipeline.render_adjustments", side_effect=adjustments
         ):
             image_pipeline.render_segment(
                 one_frame, recipe, analysis, target, lambda *a, **k: None, lambda: False
             )
 
-        self.assertEqual([call[0] for call in calls], ["gain", "grade", "golden"])
-        self.assertAlmostEqual(calls[0][1], 1.1)
-        self.assertAlmostEqual(calls[2][1], 0.8)
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(calls[0][0], 1.1)
+        self.assertEqual(calls[0][1], "natural")
+        self.assertAlmostEqual(calls[0][2], 0.8)
+        self.assertEqual(calls[0][3], "cpu")
+        self.assertFalse(calls[0][4])
+
+    def test_gpu_render_uses_decode_grade_encode_pipeline(self):
+        analysis = self._analysis_for()
+        recipe = {
+            **self.recipe,
+            "render_device": "gpu",
+            "render_workers": 2,
+            "enhance_golden": {"enable": True, "strength": 0.8},
+        }
+        target = self.root / "gpu-pipeline-target"
+        decode_threads = set()
+        grade_threads = set()
+        save_threads = set()
+
+        def load(path, decode=None, half=False):
+            decode_threads.add(threading.get_ident())
+            return np.full((8, 12, 3), 80, dtype=np.float32)
+
+        def adjust(
+            rgb, gain, style, overrides, golden, device, output_uint8=False
+        ):
+            grade_threads.add(threading.get_ident())
+            self.assertEqual(device, "gpu")
+            self.assertTrue(output_uint8)
+            return rgb.astype(np.uint8)
+
+        def save(rgb, path, quality=95):
+            save_threads.add(threading.get_ident())
+            image_ops.save_jpeg(rgb, path, quality)
+
+        with (
+            mock.patch("src.image_pipeline.resolve_render_device", return_value="gpu"),
+            mock.patch("src.image_pipeline.load_image", side_effect=load),
+            mock.patch("src.image_pipeline.render_adjustments", side_effect=adjust),
+            mock.patch("src.image_pipeline.save_jpeg", side_effect=save),
+        ):
+            result = image_pipeline.render_segment(
+                self.segment,
+                recipe,
+                analysis,
+                target,
+                lambda *a, **k: None,
+                lambda: False,
+            )
+
+        self.assertEqual(result.frame_count, len(self.frames))
+        self.assertGreaterEqual(len(decode_threads), 1)
+        self.assertEqual(grade_threads, {threading.get_ident()})
+        self.assertTrue(save_threads)
+        self.assertTrue(grade_threads.isdisjoint(save_threads))
 
     def test_failed_render_keeps_previous_published_result(self):
         target = self.root / "render-target"

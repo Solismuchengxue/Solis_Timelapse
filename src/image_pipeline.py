@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -15,15 +16,15 @@ from PIL import Image
 
 from .image_ops import (
     GOLDEN_STRENGTH,
-    apply_gain,
-    enhance_golden,
     exposure_gain,
     frame_num,
+    gpu_render_status,
     golden_ramp_strength,
-    grade_by_style,
     load_image,
     load_preview,
     measure_luminance,
+    render_adjustments,
+    resolve_render_device,
     save_jpeg,
     smooth_median,
 )
@@ -381,6 +382,181 @@ def _publish_render(temporary: Path, result: Path) -> None:
             pass
 
 
+def render_worker_count(recipe: dict, frame_count: int) -> int:
+    """Resolve a bounded worker count for the selected processing device."""
+    try:
+        configured = int(recipe.get("render_workers", 1))
+    except (TypeError, ValueError) as error:
+        raise ValueError("render workers must be an integer") from error
+    if configured < 0 or configured > 16:
+        raise ValueError("render workers must be between 0 and 16")
+    device = render_device(recipe)
+    if configured == 0:
+        configured = (
+            2
+            if device == "gpu"
+            else min(8, max(1, round((os.cpu_count() or 1) * 0.4)))
+        )
+    if device == "gpu":
+        configured = min(configured, 2)
+    return max(1, min(configured, max(1, int(frame_count))))
+
+
+def render_device(recipe: dict) -> str:
+    requested = str(recipe.get("render_device", "cpu")).casefold()
+    if requested == "auto":
+        golden = recipe.get("enhance_golden", {})
+        if not isinstance(golden, dict) or not golden.get("enable", False):
+            return "cpu"
+    return resolve_render_device(requested)
+
+
+def render_device_label(recipe: dict) -> str:
+    device = render_device(recipe)
+    if device == "gpu":
+        return f"GPU ({gpu_render_status()[1]})"
+    return "CPU"
+
+
+def _render_frame(
+    path: Path,
+    gain: float,
+    output_path: Path,
+    decode: dict,
+    style: str,
+    grade_settings: dict,
+    golden_strength: float,
+    quality: int,
+    device: str,
+    cancelled: Callable[[], bool],
+) -> None:
+    _check_cancelled(cancelled)
+    rgb = load_image(path, decode, half=False)
+    _check_cancelled(cancelled)
+    rgb = render_adjustments(
+        rgb,
+        gain,
+        style,
+        grade_settings,
+        golden_strength,
+        device,
+        output_uint8=device == "gpu",
+    )
+    _check_cancelled(cancelled)
+    save_jpeg(rgb, output_path, quality=quality)
+
+
+def _decode_pipeline_frame(
+    path: Path,
+    decode: dict,
+    cancelled: Callable[[], bool],
+) -> np.ndarray:
+    _check_cancelled(cancelled)
+    rgb = load_image(path, decode, half=False)
+    _check_cancelled(cancelled)
+    return rgb
+
+
+def _save_pipeline_frame(
+    rgb: np.ndarray,
+    output_path: Path,
+    quality: int,
+    cancelled: Callable[[], bool],
+) -> None:
+    _check_cancelled(cancelled)
+    save_jpeg(rgb, output_path, quality=quality)
+
+
+def _render_gpu_pipeline(
+    jobs: list[tuple[Path, float, Path, float]],
+    decode: dict,
+    style: str,
+    grade_settings: dict,
+    quality: int,
+    workers: int,
+    progress: Callable,
+    cancelled: Callable[[], bool],
+    total_frames: int,
+    completed_offset: int,
+) -> int:
+    """Overlap bounded RAW decoding and JPEG writes around one OpenCL queue."""
+    completed = completed_offset
+    saved = 0
+    job_iterator = iter(jobs)
+    pending_decodes = {}
+    pending_saves = {}
+
+    def submit_decode(executor: ThreadPoolExecutor) -> bool:
+        try:
+            path, gain, output_path, golden_strength = next(job_iterator)
+        except StopIteration:
+            return False
+        future = executor.submit(_decode_pipeline_frame, path, decode, cancelled)
+        pending_decodes[future] = (path, gain, output_path, golden_strength)
+        return True
+
+    def collect_saves(block: bool) -> None:
+        nonlocal completed, saved
+        if not pending_saves:
+            return
+        done, _ = wait(
+            pending_saves,
+            return_when=FIRST_COMPLETED if block else FIRST_COMPLETED,
+            timeout=None if block else 0,
+        )
+        for future in done:
+            path = pending_saves.pop(future)
+            future.result()
+            saved += 1
+            completed += 1
+            progress(completed, total_frames, frame=str(path), rejected=False)
+
+    with (
+        ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="raw-decode"
+        ) as decode_executor,
+        ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="jpeg-encode"
+        ) as save_executor,
+    ):
+        for _ in range(min(workers, len(jobs))):
+            submit_decode(decode_executor)
+
+        while pending_decodes:
+            _check_cancelled(cancelled)
+            done, _ = wait(pending_decodes, return_when=FIRST_COMPLETED)
+            for future in done:
+                path, gain, output_path, golden_strength = pending_decodes.pop(future)
+                rgb = future.result()
+                submit_decode(decode_executor)
+                _check_cancelled(cancelled)
+                adjusted = render_adjustments(
+                    rgb,
+                    gain,
+                    style,
+                    grade_settings,
+                    golden_strength,
+                    "gpu",
+                    output_uint8=True,
+                )
+                while len(pending_saves) >= workers:
+                    collect_saves(block=True)
+                save_future = save_executor.submit(
+                    _save_pipeline_frame,
+                    adjusted,
+                    output_path,
+                    quality,
+                    cancelled,
+                )
+                pending_saves[save_future] = path
+                collect_saves(block=False)
+
+        while pending_saves:
+            collect_saves(block=True)
+
+    return saved
+
+
 def render_segment(
     segment: dict,
     recipe: dict,
@@ -411,24 +587,93 @@ def render_segment(
     result_dir = target_dir / "result"
     saved = 0
     rejected_count = 0
+    workers = render_worker_count(recipe, len(paths))
+    device = render_device(recipe)
 
     try:
-        for index, (path, gain) in enumerate(zip(paths, gains), start=1):
-            _check_cancelled(cancelled)
-            if _is_rejected(path, rejection_rules):
-                rejected_count += 1
-                progress(index, len(paths), frame=str(path), rejected=True)
-                continue
+        if workers == 1:
+            for index, (path, gain) in enumerate(zip(paths, gains), start=1):
+                _check_cancelled(cancelled)
+                if _is_rejected(path, rejection_rules):
+                    rejected_count += 1
+                    progress(index, len(paths), frame=str(path), rejected=True)
+                    continue
+                _render_frame(
+                    path,
+                    gain,
+                    temporary / output_names[index - 1],
+                    decode,
+                    style,
+                    grade_settings,
+                    _golden_strength(recipe, path),
+                    quality,
+                    device,
+                    cancelled,
+                )
+                saved += 1
+                progress(index, len(paths), frame=str(path), rejected=False)
+        elif device == "gpu":
+            gpu_jobs = []
+            completed = 0
+            for index, (path, gain) in enumerate(zip(paths, gains)):
+                if _is_rejected(path, rejection_rules):
+                    rejected_count += 1
+                    completed += 1
+                    progress(
+                        completed, len(paths), frame=str(path), rejected=True
+                    )
+                    continue
+                gpu_jobs.append(
+                    (
+                        path,
+                        gain,
+                        temporary / output_names[index],
+                        _golden_strength(recipe, path),
+                    )
+                )
+            saved = _render_gpu_pipeline(
+                gpu_jobs,
+                decode,
+                style,
+                grade_settings,
+                quality,
+                workers,
+                progress,
+                cancelled,
+                len(paths),
+                completed,
+            )
+        else:
+            futures = {}
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="frame-render") as executor:
+                for index, (path, gain) in enumerate(zip(paths, gains)):
+                    rejected = _is_rejected(path, rejection_rules)
+                    if rejected:
+                        future = executor.submit(_check_cancelled, cancelled)
+                    else:
+                        future = executor.submit(
+                            _render_frame,
+                            path,
+                            gain,
+                            temporary / output_names[index],
+                            decode,
+                            style,
+                            grade_settings,
+                            _golden_strength(recipe, path),
+                            quality,
+                            device,
+                            cancelled,
+                        )
+                    futures[future] = (path, rejected)
 
-            output_name = output_names[index - 1]
-
-            rgb = load_image(path, decode, half=False)
-            rgb = apply_gain(rgb, gain)
-            rgb = grade_by_style(rgb, style, grade_settings)
-            rgb = enhance_golden(rgb, _golden_strength(recipe, path))
-            save_jpeg(rgb, temporary / output_name, quality=quality)
-            saved += 1
-            progress(index, len(paths), frame=str(path), rejected=False)
+                for completed, future in enumerate(as_completed(futures), start=1):
+                    future.result()
+                    path, rejected = futures[future]
+                    if rejected:
+                        rejected_count += 1
+                    else:
+                        saved += 1
+                    progress(completed, len(paths), frame=str(path), rejected=rejected)
 
         _check_cancelled(cancelled)
         _publish_render(temporary, result_dir)
