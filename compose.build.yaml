@@ -1,7 +1,7 @@
 services:
   solis_timelapse:
-    image: ghcr.io/solismuchengxue/solis_timelapse:latest
-    pull_policy: always
+    image: solis_timelapse:local
+    build: .
     container_name: solis_timelapse
     user: "${PUID:?请在 .env 中设置飞牛用户 UID}:${PGID:?请在 .env 中设置飞牛用户 GID}"
     environment:

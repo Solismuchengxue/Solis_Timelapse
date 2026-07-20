@@ -583,9 +583,9 @@ class WebUiStaticContractTests(unittest.TestCase):
             "Solis_Timelapse", "run.bat", "docker compose", "INPUT_PATH",
             "APP_ROOT", "/media/input:ro", "PUID", "PGID",
             "/vol1/1000/solis_timelapse", "9501", "不要直接暴露到公网",
-            "python:3.12-slim", "没有发布可直接拉取的应用镜像",
+            "ghcr.io/solismuchengxue/solis_timelapse:latest", "GitHub Actions",
             "飞牛图形界面部署", "SSH 命令部署", "docker compose config",
-            "docker compose logs", "docker compose ps", "9501:9501",
+            "docker compose pull", "docker compose logs", "docker compose ps", "9501:9501",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, readme)
