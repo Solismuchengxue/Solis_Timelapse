@@ -31,7 +31,7 @@ def load_runtime_environment(
             workspace_dir=Path("/media/workspace"),
             output_dir=Path("/media/output"),
             archive_dir=Path("/media/archive"),
-            local_config_path=Path("/data/config/local.yaml"),
+            local_config_path=Path("/data/config/config.yaml"),
             host="0.0.0.0",
             native_picker=False,
         )

@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from docker.entrypoint import migrate_legacy_container_config
 from src.runtime_env import (
     RuntimeEnvironment,
     load_runtime_environment,
@@ -37,7 +38,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(runtime.workspace_dir, Path("/media/workspace"))
         self.assertEqual(runtime.output_dir, Path("/media/output"))
         self.assertEqual(runtime.archive_dir, Path("/media/archive"))
-        self.assertEqual(runtime.local_config_path, Path("/data/config/local.yaml"))
+        self.assertEqual(runtime.local_config_path, Path("/data/config/config.yaml"))
         self.assertEqual(runtime.host, "0.0.0.0")
         self.assertFalse(runtime.native_picker)
 
@@ -75,6 +76,32 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(validate_runtime_environment(runtime), [])
         self.assertEqual(list((self.root / "workspace").iterdir()), [])
+
+    def test_container_migrates_legacy_local_yaml_without_overwriting_config(self):
+        config_dir = self.root / "config"
+        config_dir.mkdir()
+        legacy = config_dir / "local.yaml"
+        destination = config_dir / "config.yaml"
+        legacy.write_text("logging:\n  level: DEBUG\n", encoding="utf-8")
+        runtime = RuntimeEnvironment(
+            mode="container",
+            input_root=self.root / "input",
+            workspace_dir=self.root / "workspace",
+            output_dir=self.root / "output",
+            archive_dir=self.root / "archive",
+            local_config_path=destination,
+            host="0.0.0.0",
+            native_picker=False,
+        )
+
+        self.assertTrue(migrate_legacy_container_config(runtime))
+        self.assertFalse(legacy.exists())
+        self.assertIn("DEBUG", destination.read_text(encoding="utf-8"))
+
+        legacy.write_text("logging:\n  level: INFO\n", encoding="utf-8")
+        self.assertFalse(migrate_legacy_container_config(runtime))
+        self.assertTrue(legacy.exists())
+        self.assertIn("DEBUG", destination.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

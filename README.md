@@ -124,6 +124,8 @@ PGID=1000
 - `APP_ROOT`：上一步创建的应用数据根目录，不是 `app` 源码目录。
 - `PUID`、`PGID`：用于运行容器的飞牛用户 UID 和 GID，必须对四个数据目录有写权限，并对照片目录有读取权限。
 
+容器使用镜像内的默认配置启动。用户在 WebUI 保存设置后，会在宿主机生成 `${APP_ROOT}/config/config.yaml`；目录初次部署时为空是正常的。Windows 本地开发使用的 `config/local.yaml` 不会用于 Docker。
+
 通过 SSH 执行下面命令可以查询当前用户的 UID 和 GID：
 
 ```bash

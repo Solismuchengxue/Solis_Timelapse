@@ -93,6 +93,8 @@ class DockerContractTests(unittest.TestCase):
         entrypoint = (ROOT / "docker" / "entrypoint.py").read_text(encoding="utf-8")
 
         self.assertIn("validate_runtime_environment", entrypoint)
+        self.assertIn("migrate_legacy_container_config", entrypoint)
+        self.assertIn('with_name("local.yaml")', entrypoint)
         self.assertIn("Solis_Timelapse:", entrypoint)
         self.assertIn("return 2", entrypoint)
         self.assertIn('"--host", runtime.host', entrypoint)
