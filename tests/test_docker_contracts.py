@@ -45,6 +45,7 @@ class DockerContractTests(unittest.TestCase):
         workflow = workflow_path.read_text(encoding="utf-8")
 
         self.assertIn("packages: write", workflow)
+        self.assertIn("paths:", workflow)
         self.assertIn("registry: ghcr.io", workflow)
         self.assertIn("ghcr.io/solismuchengxue/solis_timelapse", workflow)
         self.assertIn("platforms: linux/amd64", workflow)

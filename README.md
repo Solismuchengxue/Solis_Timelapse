@@ -69,7 +69,7 @@ ghcr.io/solismuchengxue/solis_timelapse:latest
 
 不要在 Docker Hub 下载同名的第三方镜像。`latest` 对应主分支最新构建，版本发布还会生成 `v1.0.0` 这类固定标签。镜像由公开仓库的 `Dockerfile` 构建，可在 GitHub 的 Actions 和 Packages 页面核对构建记录与来源。
 
-首次发布镜像后，仓库所有者需要在 GitHub Packages 设置中把 Package visibility 改为 `Public`。公开后飞牛可以匿名拉取，无需配置 GitHub 账号或令牌。
+当前官方 Package 已设为 `Public`，飞牛可以匿名拉取，无需配置 GitHub 账号或令牌。自行 Fork 并发布新镜像时，应在对应 GitHub Packages 设置中确认可见性。
 
 ### 1. 安装 Docker 并确认路径
 
