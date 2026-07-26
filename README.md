@@ -1,5 +1,9 @@
 # Solis_Timelapse
 
+<p align="center">
+  <img src="assets/watchcow-icon-512.png" alt="Solis_Timelapse 图标" width="160">
+</p>
+
 Solis_Timelapse 是面向 RAW/JPEG 照片序列的延时摄影处理工具。它可以识别连续拍摄段、分析亮度与异常帧、完成去闪和风光调色、导出 MP4 视频，也可以合成包围曝光 HDR 照片。
 
 原始照片始终按只读素材处理。工作文件、成片和归档分别保存，不会移动、改名或覆盖源照片。
