@@ -18,6 +18,8 @@ __pycache__/
 config/local.yaml
 config/auth.json
 .env
+.demo-site/
+design-qa.md
 workspace/*
 !workspace/.gitkeep
 output/*

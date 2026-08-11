@@ -12,6 +12,7 @@ Solis_Timelapse 将 RAW/JPEG 照片序列整理为一条本地化、可检查、
 - 原始照片属于用户数据，处理链路不得移动、改名、覆盖或删除它们。
 - 分析、渲染、视频和归档都是长任务，需要明确进度、取消边界和发布提交点。
 - Windows 本地使用与 fnOS 容器部署共享同一业务实现，但具有不同的路径和认证策略。
+- 在线静态演示直接复用真实 WebUI，但只能由合成媒体和浏览器内 Mock API 驱动，不得触达生产后端或用户文件。
 - 最终结果需要能够追溯到输入素材、处理参数和完整性校验信息。
 
 ## 设计原则
@@ -39,6 +40,9 @@ flowchart LR
     Actions["GitHub Actions"] --> GHCR["GHCR AMD64 镜像"]
     GHCR --> FNOS["fnOS Docker Compose"]
     FNOS --> Web
+    UIAssets["webui/ 真实界面源码"] --> DemoBuild["demo/build_site.py"]
+    DemoBuild --> Mock["Mock API + 合成媒体"]
+    Mock --> Pages["GitHub Pages 静态演示"]
 ```
 
 浏览器前端是无构建步骤的 HTML/CSS/JavaScript 应用。Flask API 负责输入校验、媒体访问边界和任务编排；Python 模块负责项目状态、素材目录、图像处理、视频导出和归档。项目不依赖数据库、外部队列、对象存储或云端媒体处理服务。
@@ -61,6 +65,7 @@ flowchart LR
 - **Windows 本地模式**：`run.bat` 管理本机虚拟环境并启动 WebUI，只监听 `127.0.0.1:9501`，保持免登录。
 - **fnOS 容器模式**：固定宿主机挂载，输入只读，使用 PUID/PGID 运行，并启用首次管理员初始化和会话登录。
 - **镜像发布模式**：GitHub Actions 先执行 Python 测试，再构建并发布 `linux/amd64` GHCR 镜像；默认 Compose 固定到明确的 `sha-*` 标签。
+- **静态演示模式**：`demo/build_site.py` 白名单复制 `webui/` 的真实页面、样式和脚本，仅转换生成站点的相对资源路径并在应用脚本前注入 `demo/mock_api.js`；Mock 和合成媒体不属于生产运行时。
 
 ## 已采用架构
 
@@ -77,6 +82,7 @@ flowchart LR
 | fnOS 应用内管理员认证 | `src/auth.py`、`webui/server.py` |
 | 容器路径与启动前校验 | `src/runtime_env.py`、`docker/entrypoint.py` |
 | 自动化测试与镜像发布 | `tests/`、`.github/workflows/docker-publish.yml` |
+| WebUI 复用型静态演示与 Pages 发布 | `demo/`、`.github/workflows/pages.yml` |
 
 ## 可靠性提交点
 
@@ -93,7 +99,8 @@ flowchart LR
 - fnOS 默认通过局域网明文 HTTP 提供服务，不包含 TLS 终止或公网入口。
 - Windows 本地模式不提供登录保护，其安全边界是回环地址。
 - GPU/OpenCL/NVENC 取决于实际硬件、驱动和容器能力，失败时使用 CPU 路径。
-- 当前没有公开性能基准、客户案例、在线演示、覆盖率报告或许可证声明。
+- GitHub Pages 静态演示不执行真实媒体处理、视频编码、文件下载或归档写入，也不能代替 Docker 运行时验收。
+- 当前没有公开性能基准、客户案例、覆盖率报告或许可证声明。
 
 ## 详细文档
 

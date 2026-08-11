@@ -405,6 +405,10 @@ function renderPreviewCaption(title, frame = null, frameIndex = null) {
   caption.append(button);
 }
 
+function framePreviewUrl(segmentId, frame, index) {
+  return frame?.image_url || API.frameImage(segmentId, index);
+}
+
 function renderSegmentDetail() {
   const segment = selectedSegment();
   const recipe = recipeOf(segment);
@@ -438,7 +442,7 @@ function renderSegmentDetail() {
   if (segment && selectedFrameIndex != null) {
     const image = document.createElement("img");
     image.className = "source-frame-preview";
-    image.src = API.frameImage(segment.id, selectedFrameIndex);
+    image.src = framePreviewUrl(segment.id, selectedFrame, selectedFrameIndex);
     image.alt = frameTooltip(selectedFrame || {}, selectedFrameIndex);
     image.decoding = "async";
     surface.append(image);

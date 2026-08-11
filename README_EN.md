@@ -10,9 +10,9 @@
 
 <p align="center">
   <a href="README.md">简体中文</a> ·
+  <a href="https://solismuchengxue.github.io/Solis_Timelapse/">Live Static Demo</a> ·
   <a href="DESIGN.md">Design Overview</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
-  <a href="docs/operations/fnos.md">fnOS Deployment</a> ·
   <a href="docs/verification.md">Verification</a>
 </p>
 
@@ -30,7 +30,7 @@ Original photos remain read-only inputs. Work files, exported media, and archive
 
 - **A complete delivery path instead of disconnected utilities:** move from a photo directory to segments, review, processing, MP4 output, and an archive without manually shuffling intermediate files.
 - **Explicit commit points for long-running work:** analysis, renders, videos, and archives are published only after a complete result is available, so a failure or cancellation does not replace the previous complete result.
-- **Traceable runtime and data boundaries:** Windows, fnOS containers, GitHub Actions, pinned GHCR images, and persistent data directories each have a defined responsibility.
+- **Traceable runtime and data boundaries:** Windows, Docker containers, GitHub Actions, pinned GHCR images, and persistent data directories each have a defined responsibility.
 
 ## Core Capabilities
 
@@ -39,7 +39,7 @@ Original photos remain read-only inputs. Work files, exported media, and archive
 | Media intake and organization | Recursive RAW/JPEG discovery, EXIF metadata, time/focal-length/exposure segmentation, representative frames, thumbnails, luminance charts, and anomaly candidates |
 | Image analysis and processing | Frame rejection, deflicker, grading recipes, CPU/OpenCL device selection, and 2–9 frame HDR composition |
 | Video and archive delivery | H.264/H.265 MP4, NVENC detection with CPU fallback, atomic output publication, manifests, and SHA-256 archive verification |
-| Runtime and operations | Flask WebUI, Chinese/English UI, themes, task progress/logs/cancellation, Windows local mode, fnOS authentication, and GitHub Actions + GHCR delivery |
+| Runtime and operations | Flask WebUI, Chinese/English UI, themes, task progress/logs/cancellation, Windows local mode, Docker authentication, and GitHub Actions + GHCR delivery |
 
 ## Architecture and Integrations
 
@@ -54,8 +54,8 @@ flowchart LR
     FFmpeg --> Output["Video output"]
     Pipeline --> Archive["Verified archive<br/>Manifest + SHA-256"]
     Actions["GitHub Actions"] --> GHCR["GHCR AMD64 image"]
-    GHCR --> FNOS["fnOS Docker Compose"]
-    FNOS --> WebUI
+    GHCR --> Docker["Docker Host / Docker Compose"]
+    Docker --> WebUI
 ```
 
 The system integrates RAW decoding, EXIF extraction, OpenCV image processing, FFmpeg encoding, a Flask WebUI, Docker Compose, and GitHub Actions. Application state is file-based; no database, external queue, object store, or cloud media processor is required.
@@ -93,7 +93,7 @@ Sources stay in place throughout the workflow. Analysis and rendering re-check s
 | Verifiable delivery | Manifest, file-count, size, and SHA-256 checks | Archive unit tests and the full end-to-end workflow |
 | Traceable deployment | Image build follows tests; Compose pins a `sha-*` tag | GitHub Actions and Docker contract tests |
 
-The current test source contains 243 Python `unittest` methods, including an end-to-end scan → process → export → archive workflow built from 24 synthetic JPEG frames. See [Verification and Evidence](docs/verification.md) for the test matrix and the boundary between repository, automated, and runtime evidence.
+The current test source contains 251 Python `unittest` methods, including an end-to-end scan → process → export → archive workflow built from 24 synthetic JPEG frames. See [Verification and Evidence](docs/verification.md) for the test matrix and the boundary between repository, automated, and runtime evidence.
 
 ## Quick Start
 
@@ -108,19 +108,23 @@ Python 3.12 is required:
 
 Closing the launcher window stops the WebUI. Windows local mode remains unauthenticated and listens only on the loopback interface.
 
-### fnOS Docker Deployment
+### Live Static Demo
 
-fnOS pulls the AMD64 image produced by GitHub Actions; it does not build the repository on the NAS:
+[Open the Live Static Demo](https://solismuchengxue.github.io/Solis_Timelapse/). It reuses the real WebUI with an in-browser Mock API and synthetic data to demonstrate segmentation, frame inspection, luminance analysis, rendering, export, and archive workflows. It does not run the Flask backend, read real files, or create real videos or archives.
+
+### Docker Deployment
+
+Deploy the GHCR image produced by GitHub Actions without building the repository on the Docker host:
 
 ```text
 ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
 ```
 
-Prepare `/vol1/1000/Solis_Timelapse`, upload `compose.yaml` and `.env`, and create the persistent `workspace`, `output`, `archive`, and `config` directories. `.env` must include:
+Prepare `/srv/solis_timelapse`, place `compose.yaml` and `.env` there, and create the persistent `workspace`, `output`, `archive`, and `config` directories. `.env` must include:
 
 ```dotenv
-INPUT_PATH=/vol1/1000/照片/延时摄影
-APP_ROOT=/vol1/1000/Solis_Timelapse
+INPUT_PATH=/srv/timelapse/input
+APP_ROOT=/srv/solis_timelapse
 PUID=1000
 PGID=1000
 ```
@@ -128,24 +132,22 @@ PGID=1000
 The source directory is mounted as `/media/input:ro`. After replacing the example paths and IDs with real values, run:
 
 ```bash
-cd /vol1/1000/Solis_Timelapse
+cd /srv/solis_timelapse
 docker compose config
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-Open `http://FNOS-IP:9501/`. The first visit displays the administrator setup page; later visits require a login.
+Open `http://DOCKER-HOST:9501/`. The first visit displays the administrator setup page; later visits require a login.
 
-To reset a forgotten password from a trusted fnOS administration session:
+To reset a forgotten password on a trusted Docker host, back up and remove `/srv/solis_timelapse/config/auth.json`:
 
 ```bash
-cd /vol1/1000/Solis_Timelapse
+cd /srv/solis_timelapse
 mv config/auth.json config/auth.json.bak
 docker compose restart
 ```
-
-See the [fnOS Docker Runbook](docs/operations/fnos.md) for GUI deployment, SSH deployment, permissions, upgrades, logs, authentication reset, and troubleshooting. The runbook is maintained in Chinese because it targets the current fnOS operating environment.
 
 ## WebUI Notes
 
@@ -190,16 +192,16 @@ Processed JPEG frames and low-bitrate preview videos are not treated as final ar
 ## Current Limitations and Security Boundary
 
 - GitHub Actions currently builds `linux/amd64` only; ARM64 has not been validated.
-- fnOS exposes port `9501` over plain HTTP for a trusted LAN; do not expose it directly to the public internet.
+- Docker publishes port `9501` over plain HTTP; keep it on a trusted network and do not expose it directly to the public internet.
 - Application login does not replace HTTPS, host permissions, network access control, or backups.
 - Windows local mode has no login; its security boundary is `127.0.0.1`.
 - OpenCL and NVENC depend on hardware, drivers, and container configuration; the application falls back to CPU when unavailable.
-- The project currently has no public performance benchmark, customer case study, hosted demo, coverage report, or declared license.
+- The static demo uses synthetic data only and performs no real media processing, video encoding, downloads, or archive writes.
+- The project currently has no public performance benchmark, customer case study, coverage report, or declared license.
 
 ## Project Documentation
 
 - [Design Overview](DESIGN.md): goals, principles, system shape, boundaries, and adopted architecture.
 - [Architecture and Integrations](docs/architecture.md): components, data flow, integrations, and trade-offs.
-- [fnOS Docker Runbook](docs/operations/fnos.md): deployment, upgrades, authentication reset, and troubleshooting.
 - [Verification and Evidence](docs/verification.md): test matrix, commands, and evidence boundaries.
 - [中文 README](README.md): the default Chinese project entry.

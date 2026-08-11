@@ -10,9 +10,9 @@
 
 <p align="center">
   <a href="README_EN.md">English</a> ·
+  <a href="https://solismuchengxue.github.io/Solis_Timelapse/">在线静态演示</a> ·
   <a href="DESIGN.md">设计总览</a> ·
   <a href="docs/architecture.md">架构</a> ·
-  <a href="docs/operations/fnos.md">fnOS 部署</a> ·
   <a href="docs/verification.md">验证证据</a>
 </p>
 
@@ -30,7 +30,7 @@ Solis_Timelapse 把素材扫描、自动分段、画面分析、照片渲染、�
 
 - **把离散工具连接成完整交付链路**：从照片目录直接进入分段、检查、处理、MP4 和归档，不依赖手工搬运中间文件。
 - **让自动化处理具有明确提交点**：分析、渲染、视频和归档完整生成后才发布，失败或取消不覆盖上一份完整结果。
-- **让部署与数据边界可追溯**：Windows 本地入口、fnOS 容器、GitHub Actions、GHCR 固定镜像和持久化目录各自职责明确。
+- **让部署与数据边界可追溯**：Windows 本地入口、Docker 容器、GitHub Actions、GHCR 固定镜像和持久化目录各自职责明确。
 
 ## 核心能力
 
@@ -39,7 +39,7 @@ Solis_Timelapse 把素材扫描、自动分段、画面分析、照片渲染、�
 | 素材接入与组织 | 递归扫描 RAW/JPEG、读取 EXIF、按时间/焦距/曝光变化分段、代表帧、缩略图、亮度曲线和异常候选 |
 | 图像分析与处理 | 坏帧排除、去闪、自然/通透/色彩强化/霞光增强配方、CPU/OpenCL 设备选择、2–9 帧 HDR |
 | 视频与归档交付 | H.264/H.265 MP4、NVENC 检测与 CPU 回退、原子输出、Manifest 与 SHA-256 校验归档 |
-| 运行与运维 | Flask WebUI、中英文界面、主题、任务进度/日志/取消、Windows 本地模式、fnOS 登录、GitHub Actions + GHCR |
+| 运行与运维 | Flask WebUI、中英文界面、主题、任务进度/日志/取消、Windows 本地模式、Docker 登录、GitHub Actions + GHCR |
 
 ## 架构与集成
 
@@ -54,8 +54,8 @@ flowchart LR
     FFmpeg --> Output["视频输出"]
     Pipeline --> Archive["校验归档<br/>Manifest + SHA-256"]
     Actions["GitHub Actions"] --> GHCR["GHCR AMD64 镜像"]
-    GHCR --> FNOS["fnOS Docker Compose"]
-    FNOS --> WebUI
+    GHCR --> Docker["Docker Host / Docker Compose"]
+    Docker --> WebUI
 ```
 
 系统集成了 RAW 解码、EXIF、OpenCV 图像处理、FFmpeg 视频编码、Flask WebUI、Docker Compose 和 GitHub Actions。业务状态保存在本地文件中，不依赖数据库、外部队列、对象存储或云端媒体服务。
@@ -93,7 +93,7 @@ flowchart LR
 | 交付可校验 | Manifest、文件数量、大小和 SHA-256 | 归档单元测试与完整端到端流程 |
 | 部署可追溯 | 测试后构建镜像，Compose 固定 `sha-*` 标签 | GitHub Actions 与 Docker 静态契约 |
 
-当前测试源码包含 243 个 Python `unittest` 测试方法，并包含一条使用 24 张合成 JPEG 的扫描 → 处理 → 导出 → 归档端到端测试。测试范围和“已验证/未验证”边界见 [验证与证据](docs/verification.md)。
+当前测试源码包含 251 个 Python `unittest` 测试方法，并包含一条使用 24 张合成 JPEG 的扫描 → 处理 → 导出 → 归档端到端测试。测试范围和“已验证/未验证”边界见 [验证与证据](docs/verification.md)。
 
 ## 快速开始
 
@@ -108,19 +108,23 @@ flowchart LR
 
 关闭启动窗口会停止 WebUI。Windows 双击 `run.bat` 的本地模式保持原有的免登录行为，服务只监听回环地址。
 
-### 飞牛 fnOS Docker 部署
+### 在线静态演示
 
-fnOS 只使用 GitHub Actions 发布的 GHCR 镜像，不在 NAS 上构建源码：
+[打开在线静态演示](https://solismuchengxue.github.io/Solis_Timelapse/)。演示直接复用真实 WebUI，通过浏览器内 Mock API 和合成数据展示分段、帧检查、亮度曲线、渲染、导出与归档流程；它不启动 Flask 后端、不读取真实文件，也不生成真实视频或归档。
+
+### Docker 部署
+
+部署时直接使用 GitHub Actions 发布的 GHCR 镜像，不需要在 Docker 主机上构建源码：
 
 ```text
 ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
 ```
 
-准备 `/vol1/1000/Solis_Timelapse`，放入仓库的 `compose.yaml` 和 `.env`，并创建 `workspace`、`output`、`archive`、`config` 四个持久化目录。`.env` 至少包含：
+准备 `/srv/solis_timelapse`，放入仓库的 `compose.yaml` 和 `.env`，并创建 `workspace`、`output`、`archive`、`config` 四个持久化目录。`.env` 至少包含：
 
 ```dotenv
-INPUT_PATH=/vol1/1000/照片/延时摄影
-APP_ROOT=/vol1/1000/Solis_Timelapse
+INPUT_PATH=/srv/timelapse/input
+APP_ROOT=/srv/solis_timelapse
 PUID=1000
 PGID=1000
 ```
@@ -128,24 +132,22 @@ PGID=1000
 原始照片在容器中挂载为 `/media/input:ro`。确认路径和 UID/GID 后执行：
 
 ```bash
-cd /vol1/1000/Solis_Timelapse
+cd /srv/solis_timelapse
 docker compose config
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-浏览器访问 `http://飞牛IP:9501/`。首次访问会显示“初始化管理员”，后续访问进入登录页。
+浏览器访问 `http://DOCKER-HOST:9501/`。首次访问会显示“初始化管理员”，后续访问进入登录页。
 
-忘记密码时，在可信局域网的 fnOS 管理环境中重置认证文件：
+忘记密码时，在可信 Docker 主机上备份并重置 `/srv/solis_timelapse/config/auth.json`：
 
 ```bash
-cd /vol1/1000/Solis_Timelapse
+cd /srv/solis_timelapse
 mv config/auth.json config/auth.json.bak
 docker compose restart
 ```
-
-完整的飞牛图形界面部署、SSH 命令部署、权限、升级、日志和排障步骤见 [fnOS Docker 运行手册](docs/operations/fnos.md)。
 
 ## WebUI 使用提示
 
@@ -190,16 +192,16 @@ archive/YYYY-MM-DD_HHMMSS/
 ## 当前限制与安全边界
 
 - GitHub Actions 当前只构建 `linux/amd64` 镜像，ARM64 未验证。
-- fnOS 的 `9501` 仍是明文 HTTP，只适合可信局域网；不要直接暴露到公网。
+- Docker 发布的 `9501` 端口仍是明文 HTTP，只适合可信网络；不要直接暴露到公网。
 - 应用内登录不能替代 HTTPS、宿主机权限、网络访问控制和备份。
 - Windows 本地模式不启用登录，其安全边界是 `127.0.0.1`。
 - OpenCL/NVENC 取决于硬件、驱动和容器配置；不可用时回退 CPU。
-- 项目目前没有公开性能基准、客户案例、在线演示、覆盖率报告或许可证声明。
+- 在线静态演示只使用合成数据，不执行真实媒体处理、视频编码、文件下载或归档写入。
+- 项目目前没有公开性能基准、客户案例、覆盖率报告或许可证声明。
 
 ## 项目文档
 
 - [设计总览](DESIGN.md)：目标、原则、系统形态、边界和已采用架构。
 - [架构与集成](docs/architecture.md)：组件职责、数据流、集成对象和技术取舍。
-- [fnOS Docker 运行手册](docs/operations/fnos.md)：完整部署、更新、认证重置和排障。
 - [验证与证据](docs/verification.md)：测试矩阵、验证命令和证据边界。
 - [English README](README_EN.md)：面向英文读者的对等项目入口。

@@ -8,7 +8,7 @@
 
 Solis_Timelapse 是本地优先的延时摄影处理系统。系统读取用户选择的 RAW/JPEG 照片，建立项目和分段，生成分析资产与处理后的 JPEG 序列，通过 FFmpeg 导出视频，并按需建立包含原片副本、配方、分析和最终成片的归档。
 
-系统范围不包含照片采集、云端同步、团队协作、外部数据库、对象存储、公开托管、TLS 终止或第三方身份提供商。
+生产处理系统范围不包含照片采集、云端同步、团队协作、外部数据库、对象存储、TLS 终止或第三方身份提供商。GitHub Pages 只托管复用 WebUI 的合成数据静态演示，不属于生产处理系统。
 
 ## 2. 组件关系
 
@@ -51,6 +51,10 @@ flowchart TB
     Actions["GitHub Actions"] --> GHCR["GHCR"]
     GHCR --> Container["fnOS 容器"]
     Container --> Application
+
+    UI --> DemoBuild["demo/build_site.py"]
+    DemoBuild --> DemoMock["Mock API + 合成媒体"]
+    DemoMock --> Pages["GitHub Pages"]
 ```
 
 ## 3. 组件职责
@@ -67,6 +71,12 @@ flowchart TB
 - fnOS 管理员初始化、登录、退出和会话保护。
 
 媒体路由不会把客户端路径直接拼接到文件系统。候选路径必须解析在允许根目录内，并满足当前项目或 Manifest 的登记范围。
+
+### 静态演示链路
+
+`demo/build_site.py` 从 `webui/` 白名单组装 `.demo-site/`：`styles.css`、`ui_prefs.js` 与 `app.js` 逐字节复用，只在生成的 `index.html` 中改写相对资源路径并提前注入 `demo/mock_api.js`。Mock API 返回与 Flask API 相同的核心响应形状，使用 12 张合成图片和内存状态模拟扫描、渲染、导出、归档与重置。
+
+静态演示与 Flask API 明确隔离：同源 API 请求由 Mock 拦截，未知操作失败关闭，跨源请求返回拒绝；它不读取用户文件、不运行 Python 媒体管线、不生成视频、不下载结果、不写归档。`.demo-site/` 仅是被 Git 忽略的构建产物，Pages 工作流只上传该目录。
 
 ### 项目与任务状态
 
@@ -140,6 +150,7 @@ sequenceDiagram
 | Flask | WebUI API、会话和媒体服务 | Windows 只监听回环；容器模式启用认证 |
 | Docker Compose | fnOS 运行与挂载 | 输入强制 `:ro`；数据目录必须显式持久化 |
 | GitHub Actions / GHCR | 测试、镜像构建和发布 | 构建依赖测试 Job；当前只发布 AMD64 |
+| GitHub Actions / Pages | 复用 WebUI 的公开静态演示 | 只上传 `.demo-site/`；Mock 和合成媒体与生产 Flask 运行时隔离 |
 
 ## 6. 关键取舍
 

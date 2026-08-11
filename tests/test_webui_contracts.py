@@ -124,7 +124,7 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("function currentSegmentIdsForAction()", self.js)
         self.assertIn("function hasSegmentVideo(segment)", self.js)
         self.assertIn("state.selectedSegmentIds", self.js)
-        self.assertIn('API.frameImage(segment.id, selectedFrameIndex)', self.js)
+        self.assertIn('framePreviewUrl(segment.id, selectedFrame, selectedFrameIndex)', self.js)
         self.assertIn('API.segmentVideo(segment.id)', self.js)
         self.assertIn('className = "source-frame-preview"', self.js)
         self.assertIn('state.selectedFrames = state.thumbnailTotal ? new Set([0]) : new Set()', self.js)
@@ -137,6 +137,14 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn("currentSegmentIdsForAction()", export_body)
         self.assertIn("currentSegmentIdsForAction()", archive_body)
         self.assertNotIn("selectedSegmentIds", export_body + archive_body)
+
+    def test_frame_preview_accepts_static_demo_media_without_changing_api_fallback(self):
+        self.assertIn("function framePreviewUrl(segmentId, frame, index)", self.js)
+        self.assertIn("frame?.image_url || API.frameImage(segmentId, index)", self.js)
+        self.assertIn(
+            "image.src = framePreviewUrl(segment.id, selectedFrame, selectedFrameIndex)",
+            self.js,
+        )
 
     def test_workflow_buttons_follow_render_cancel_preview_export_archive_order(self):
         row = re.search(r'<div class="workflow-action-row">(.*?)</div>', self.html, re.DOTALL)
@@ -577,40 +585,25 @@ class WebUiStaticContractTests(unittest.TestCase):
         self.assertIn('payload.cleanup_targets', self.js)
         self.assertIn('state.task = { status: "idle", completed: 0, total: 0', self.js)
 
-    def test_user_documentation_covers_windows_and_fnos_deployment(self):
+    def test_user_documentation_covers_windows_docker_and_static_demo(self):
         readme = README_PATH.read_text(encoding="utf-8")
         english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
-        design = (ROOT / "DESIGN.md").read_text(encoding="utf-8")
-        runbook = (ROOT / "docs" / "operations" / "fnos.md").read_text(encoding="utf-8")
         for token in (
-            "Solis_Timelapse", "run.bat", "docker compose", "INPUT_PATH",
-            "APP_ROOT", "/media/input:ro", "PUID", "PGID",
-            "/vol1/1000/Solis_Timelapse", "9501", "不要直接暴露到公网",
-            "ghcr.io/solismuchengxue/solis_timelapse:sha-887a557", "GitHub Actions",
-            "docs/operations/fnos.md", "docs/architecture.md", "docs/verification.md",
+            "https://solismuchengxue.github.io/Solis_Timelapse/",
+            "docker compose", "INPUT_PATH", "APP_ROOT", "/media/input:ro",
+            "PUID", "PGID", "/srv/solis_timelapse", "DOCKER-HOST",
+            "ghcr.io/solismuchengxue/solis_timelapse:sha-887a557",
+            "docs/architecture.md", "docs/verification.md",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, readme)
-        for token in (
-            "飞牛图形界面部署", "SSH 命令部署", "docker compose config",
-            "docker compose pull", "docker compose logs", "docker compose ps", "9501:9501",
-            "mv config/auth.json config/auth.json.bak",
-        ):
-            with self.subTest(runbook_token=token):
-                self.assertIn(token, runbook)
-        for token in (
-            "Solis_Timelapse", "run.bat", "docker compose", "sha-887a557",
-            "AMD64", "127.0.0.1", "docs/architecture.md", "docs/verification.md",
-        ):
+        for token in ("Live Static Demo", "synthetic data", "docker compose", "/srv/solis_timelapse", "DOCKER-HOST"):
             with self.subTest(english_token=token):
                 self.assertIn(token, english)
-        for token in ("状态：accepted", "docs/architecture.md", "docs/operations/fnos.md", "docs/verification.md"):
-            with self.subTest(design_token=token):
-                self.assertIn(token, design)
-        self.assertNotIn("/vol1/1000/solis_timelapse", readme)
-        self.assertNotIn("/vol1/1000/Solis_Timelapse/app", readme)
-        self.assertNotIn("compose.build.yaml", readme)
-        self.assertNotIn("本地构建备用方案", readme)
+        for document in (readme, english):
+            for forbidden in ("fnOS", "飞牛", "/vol1/", "docs/operations/fnos.md", "作品集", "个人职责"):
+                with self.subTest(forbidden=forbidden):
+                    self.assertNotIn(forbidden, document)
         for internal_token in (
             "F:\\01_Project", "migrate_to_new_path.bat", "DEVLOG.md",
             "PLAYBOOK.md", ".codex", "junction",

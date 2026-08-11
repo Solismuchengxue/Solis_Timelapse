@@ -21,6 +21,8 @@
 - 用户可见行为、安装或使用方式变化时同步更新 `README.md` 与 `README_EN.md`。
 - 架构、组件职责、集成对象、运行模式或数据边界变化时更新 `DESIGN.md` 与 `docs/architecture.md`。
 - fnOS 镜像、目录、Compose、认证重置、升级或排障方式变化时更新 `docs/operations/fnos.md`，并检查中英文 README 的快速入口。
+- 静态演示不得复制或维护第二套 WebUI 源码；`demo/build_site.py` 只能从 `webui/` 白名单组装站点，`.demo-site/` 必须保持 Git 忽略且不得提交。
+- WebUI 结构、核心 API 路由或响应形状变化时，同步更新 `demo/mock_api.js`、静态演示契约与相关架构/验证文档。
 - 测试命令、覆盖范围、现场验收或已验证/未验证边界变化时更新 `docs/verification.md`。
 - 当前行动、优先级、阻塞项和下一步写入本机 `TODO.md`，完成或失效后及时移除。
 - 项目实现事实、故障、验证证据和演进过程写入本机 `DEVLOG.md`。
@@ -33,10 +35,12 @@
 
 ```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -v
-.venv\Scripts\python.exe -m compileall -q src webui docker tests
+.venv\Scripts\python.exe -m compileall -q src webui docker demo tests
 node --check webui\app.js
 node --check webui\ui_prefs.js
+node --check demo\mock_api.js
 node tests\test_webui_contracts.js
+node tests\test_demo_mock.js
 git diff --check
 ```
 

@@ -21,10 +21,13 @@
 
 ```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -v
-.venv\Scripts\python.exe -m compileall -q src webui docker tests
+.venv\Scripts\python.exe -m compileall -q src webui docker demo tests
 node --check webui\app.js
 node --check webui\ui_prefs.js
+node --check demo\mock_api.js
 node tests\test_webui_contracts.js
+node tests\test_demo_mock.js
+.venv\Scripts\python.exe demo\build_site.py --output .demo-site
 git diff --check
 ```
 
@@ -41,7 +44,7 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 
 ## 3. 当前自动化覆盖
 
-截至 2026-08-11，测试源码包含 243 个 Python `unittest` 测试方法。这个数字描述当前测试清单，不代表任意未来工作区已经运行通过。
+截至 2026-08-12，测试源码包含 251 个 Python `unittest` 测试方法。这个数字描述当前测试清单，不代表任意未来工作区已经运行通过。
 
 | 测试文件 | 主要覆盖 |
 | --- | --- |
@@ -49,6 +52,7 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 | `tests/test_auth.py` | scrypt 密码记录、初始化、验证、损坏状态和原子写入 |
 | `tests/test_config_io.py` | 默认配置、本机覆盖和配置写入 |
 | `tests/test_docker_contracts.py` | Compose、固定 GHCR 镜像、AMD64 工作流、挂载、认证文档 |
+| `tests/test_demo_contracts.py` / `test_demo_mock.js` | WebUI 白名单组装、12 张合成媒体、Mock 路由与状态、外部请求拒绝、Pages artifact 边界 |
 | `tests/test_end_to_end.py` | 合成 24 帧序列的扫描、处理、导出、归档与源文件哈希不变 |
 | `tests/test_hdr_merge.py` | HDR 对齐、融合、辐射模式、输出和参数边界 |
 | `tests/test_image_ops.py` | 解码、亮度、调色、去闪、设备选择和数值安全 |
@@ -73,8 +77,19 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 | 无 GPU 时仍可运行 | OpenCL/NVENC 能力检测和 CPU 回退测试 |
 | 部署镜像可追溯 | Compose 固定 `sha-*`、GitHub Actions 标签和合约测试 |
 | 容器业务路由需要登录 | 初始化、登录、退出、会话、API 和媒体路由测试 |
+| 静态演示不访问真实后端或外部网络 | Mock 路由测试、敏感路径扫描、未知路由和跨源请求失败关闭 |
 
-## 5. 历史 fnOS 验收边界
+## 5. 静态演示证据边界
+
+静态演示的证据分三层，不能互相替代：
+
+1. **本地自动证据**：`tests/test_demo_contracts.py`、`tests/test_demo_mock.js`、语法检查和 `build_site.py` 证明组装白名单、响应形状、12 张合成媒体、确定性状态和 Pages artifact 边界。
+2. **本地浏览器证据**：在本机 HTTP 服务中，以桌面和移动视口验证实际页面渲染、分段切换、坏帧、主题/语言、模拟任务、控制台和网络请求。
+3. **线上发布证据**：只有工作流在 GitHub 上成功且公开 URL 可访问，才能声称在线静态演示已发布。仓库内工作流文件和本地构建成功本身不构成线上可用证据。
+
+静态演示只证明 WebUI 的展示与核心交互契约，不证明 Flask、图像管线、FFmpeg、Docker 容器或真实文件处理正在运行。
+
+## 6. 历史 fnOS 验收边界
 
 2026-08-11 对固定镜像 `sha-887a557` 完成过一次 fnOS 现场验收，范围包括：容器 healthy、镜像 revision、首次初始化、登录/退出/重新登录、匿名业务 API 拒绝、输入只读挂载和关键数据基线未变化。
 
@@ -88,18 +103,18 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 
 新部署按 [fnOS 运行手册](operations/fnos.md) 的最小验收清单重新核对。
 
-## 6. 当前未提供的证据
+## 7. 当前未提供的证据
 
 - ARM64 构建与运行验收；
 - TLS、公网部署和外部身份系统集成；
 - 可公开复现的性能基准；
 - 自动化覆盖率报告；
 - 客户采用、用户规模或量化业务收益；
-- 持续在线演示或正式 Release 验收；
+- GitHub Pages 线上工作流与公开 URL 验收（在实际推送并核对前）；
 - 许可证兼容性结论。
 
-在补充对应证据前，README 和作品集材料不得把这些内容表述为现有能力。
+在补充对应证据前，README 和其他项目介绍不得把这些内容表述为现有能力。
 
-## 7. 更新触发条件
+## 8. 更新触发条件
 
 测试数量、标准命令、部署镜像、平台架构、运行时验收或安全边界变化时更新本文件。任何“已通过”结论必须同时记录实际命令、时间点和输出摘要。
