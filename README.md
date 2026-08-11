@@ -68,10 +68,10 @@ HDR 最适合同一机位、短时间内拍摄的包围曝光。直接选择延�
 项目只通过 GitHub Actions 自动构建并发布 AMD64 镜像，飞牛部署只拉取已发布的 GHCR 镜像，不在飞牛或其他部署主机上本地构建：
 
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:latest
+ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
 ```
 
-不要在 Docker Hub 下载同名的第三方镜像。`latest` 对应主分支最新构建，版本发布还会生成 `v1.0.0` 这类固定标签。镜像由公开仓库的 `Dockerfile` 构建，可在 GitHub 的 Actions 和 Packages 页面核对构建记录与来源。
+不要在 Docker Hub 下载同名的第三方镜像。Compose 固定到 `sha-887a557`，该标签对应加入 fnOS 管理员登录的 Git 提交，不会自动漂移到后续构建；版本发布还会生成 `v1.0.0` 这类固定标签。镜像由公开仓库的 `Dockerfile` 构建，可在 GitHub 的 Actions 和 Packages 页面核对构建记录与来源。
 
 当前官方 Package 已设为 `Public`，飞牛可以匿名拉取，无需配置 GitHub 账号或令牌。自行 Fork 并发布新镜像时，应在对应 GitHub Packages 设置中确认可见性。
 
@@ -164,7 +164,7 @@ name: solis_timelapse
 
 services:
   solis_timelapse:
-    image: ghcr.io/solismuchengxue/solis_timelapse:latest
+    image: ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
     pull_policy: always
     container_name: solis_timelapse
     user: "${PUID:?请在 .env 中设置飞牛用户 UID}:${PGID:?请在 .env 中设置飞牛用户 GID}"
@@ -186,7 +186,7 @@ services:
 
 - `name: solis_timelapse`：固定 Compose 项目名，不再使用配置文件所在目录名。
 - `image`：从 GitHub Container Registry 拉取项目官方镜像。
-- `pull_policy: always`：每次创建或更新容器前检查 `latest` 是否有新版本。
+- `pull_policy: always`：每次创建或更新容器前确认固定标签对应的镜像可用；固定标签不会自动切换版本。
 - `user`：使用飞牛真实 UID/GID 运行，不使用 root。
 - `9501:9501`：左边是飞牛端口，右边是容器端口。如果飞牛的 9501 已占用，只把左边改成例如 `19501:9501`，访问地址也改为 `http://飞牛IP:19501/`。
 - 五条 `volumes`：把照片、工作区、输出、归档和配置放在宿主机。不要修改冒号右侧的容器路径。
@@ -219,7 +219,7 @@ cd /vol1/1000/Solis_Timelapse
 # 检查 .env 是否被正确读取，并展开最终 Compose 配置
 docker compose config
 
-# 拉取 GitHub Actions 发布的最新镜像
+# 拉取 Compose 固定的 GitHub Actions 镜像
 docker compose pull
 
 # 在后台创建并启动容器
@@ -262,7 +262,7 @@ docker compose down
 
 ### 9. 更新 Solis_Timelapse
 
-GitHub Actions 发布新版镜像后，在飞牛 Compose 页面执行“拉取/重新部署”，或通过 SSH 执行：
+GitHub Actions 发布新版镜像后，先把 `compose.yaml` 的 `image` 明确更新为该版本的 `sha-<短提交>` 标签，再在飞牛 Compose 页面执行“拉取/重新部署”，或通过 SSH 执行：
 
 ```bash
 cd /vol1/1000/Solis_Timelapse

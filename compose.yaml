@@ -2,7 +2,7 @@ name: solis_timelapse
 
 services:
   solis_timelapse:
-    image: ghcr.io/solismuchengxue/solis_timelapse:latest
+    image: ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
     pull_policy: always
     container_name: solis_timelapse
     user: "${PUID:?请在 .env 中设置飞牛用户 UID}:${PGID:?请在 .env 中设置飞牛用户 GID}"

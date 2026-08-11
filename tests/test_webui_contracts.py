@@ -583,7 +583,7 @@ class WebUiStaticContractTests(unittest.TestCase):
             "Solis_Timelapse", "run.bat", "docker compose", "INPUT_PATH",
             "APP_ROOT", "/media/input:ro", "PUID", "PGID",
             "/vol1/1000/Solis_Timelapse", "9501", "不要直接暴露到公网",
-            "ghcr.io/solismuchengxue/solis_timelapse:latest", "GitHub Actions",
+            "ghcr.io/solismuchengxue/solis_timelapse:sha-887a557", "GitHub Actions",
             "飞牛图形界面部署", "SSH 命令部署", "docker compose config",
             "docker compose pull", "docker compose logs", "docker compose ps", "9501:9501",
         ):

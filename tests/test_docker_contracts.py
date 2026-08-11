@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,12 @@ class DockerContractTests(unittest.TestCase):
         volumes = service["volumes"]
 
         self.assertEqual(compose["name"], "solis_timelapse")
-        self.assertEqual(service["image"], "ghcr.io/solismuchengxue/solis_timelapse:latest")
+        self.assertRegex(
+            service["image"],
+            r"^ghcr\.io/solismuchengxue/solis_timelapse:sha-[0-9a-f]{7,40}$",
+        )
+        self.assertIn(service["image"], (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertNotIn(":latest", service["image"])
         self.assertEqual(service["pull_policy"], "always")
         self.assertNotIn("build", service)
         self.assertEqual(service["container_name"], "solis_timelapse")
