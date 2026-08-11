@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import subprocess
 import threading
@@ -205,7 +206,7 @@ class WebUiApiTests(unittest.TestCase):
             host="0.0.0.0",
             native_picker=False,
         )
-        app = create_app({"TESTING": True, "runtime_environment": runtime})
+        app = create_app({"TESTING": True, "runtime_environment": runtime, "auth_enabled": False})
         client = app.test_client()
         try:
             self.assertEqual(client.get("/api/health").get_json(), {"status": "ok"})
@@ -252,7 +253,7 @@ class WebUiApiTests(unittest.TestCase):
             host="0.0.0.0",
             native_picker=False,
         )
-        app = create_app({"TESTING": True, "runtime_environment": runtime})
+        app = create_app({"TESTING": True, "runtime_environment": runtime, "auth_enabled": False})
         try:
             response = app.test_client().post("/api/project/scan", json={"source_dir": str(outside)})
             self.assertEqual(response.status_code, 400)
@@ -1169,6 +1170,247 @@ class WebUiApiTests(unittest.TestCase):
         self.assertTrue(any("已清除当前项目" in message for message in messages))
         self.assertTrue(any("输出目录已清空" in message for message in messages))
         self.assertTrue(any("源照片和归档目录未删除" in message for message in messages))
+
+
+class WebUiAuthTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1])
+        self.root = Path(self.temp.name)
+        for name in ("input", "workspace", "output", "archive", "config"):
+            (self.root / name).mkdir()
+        runtime = RuntimeEnvironment(
+            mode="container",
+            input_root=self.root / "input",
+            workspace_dir=self.root / "workspace",
+            output_dir=self.root / "output",
+            archive_dir=self.root / "archive",
+            local_config_path=self.root / "config" / "config.yaml",
+            host="0.0.0.0",
+            native_picker=False,
+        )
+        self.app = create_app({"TESTING": True, "runtime_environment": runtime})
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self.app.extensions["timelapse_tasks"].shutdown()
+        self.temp.cleanup()
+
+    def _csrf_from(self, path):
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        match = re.search(r'name="csrf_token" value="([^"]+)"', response.get_data(as_text=True))
+        response.close()
+        self.assertIsNotNone(match)
+        return match.group(1)
+
+    def _setup_admin(self):
+        csrf = self._csrf_from("/auth/setup")
+        response = self.client.post("/auth/setup", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "correct horse battery",
+            "password_confirm": "correct horse battery",
+        })
+        self.assertEqual(response.status_code, 302)
+        response.close()
+        return csrf
+
+    def test_uninitialized_container_protects_app_but_not_health(self):
+        navigation = self.client.get("/")
+        api = self.client.get("/api/state")
+        health = self.client.get("/api/health")
+
+        self.assertEqual(navigation.status_code, 302)
+        self.assertTrue(navigation.headers["Location"].startswith("/auth/setup"))
+        self.assertEqual(api.status_code, 401)
+        self.assertEqual(api.get_json()["code"], "authentication_required")
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.get_json(), {"status": "ok"})
+
+    def test_uninitialized_container_serves_setup_form(self):
+        response = self.client.get("/auth/setup")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("初始化管理员", html)
+        for field in ("username", "password", "password_confirm", "csrf_token"):
+            self.assertRegex(html, rf'name="{field}"')
+        for asset in ("/styles.css", "/ui_prefs.js"):
+            asset_response = self.client.get(asset)
+            self.assertEqual(asset_response.status_code, 200)
+            asset_response.close()
+
+    def test_setup_creates_hashed_admin_record(self):
+        csrf = self._csrf_from("/auth/setup")
+
+        response = self.client.post("/auth/setup", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "correct horse battery",
+            "password_confirm": "correct horse battery",
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/")
+        auth_path = self.root / "config" / "auth.json"
+        raw = auth_path.read_text(encoding="utf-8")
+        self.assertIn('"username": "owner"', raw)
+        self.assertNotIn("correct horse battery", raw)
+
+    def test_setup_rejects_missing_csrf_without_creating_admin(self):
+        response = self.client.post("/auth/setup", data={
+            "username": "owner",
+            "password": "correct horse battery",
+            "password_confirm": "correct horse battery",
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("页面已过期", response.get_data(as_text=True))
+        self.assertFalse((self.root / "config" / "auth.json").exists())
+
+    def test_setup_rejects_mismatched_password_confirmation(self):
+        csrf = self._csrf_from("/auth/setup")
+
+        response = self.client.post("/auth/setup", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "correct horse battery",
+            "password_confirm": "different password",
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("两次输入的密码不一致", response.get_data(as_text=True))
+        self.assertFalse((self.root / "config" / "auth.json").exists())
+
+    def test_setup_rejects_invalid_account_fields(self):
+        csrf = self._csrf_from("/auth/setup")
+
+        response = self.client.post("/auth/setup", data={
+            "csrf_token": csrf,
+            "username": "   ",
+            "password": "short",
+            "password_confirm": "short",
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("用户名需为 1–64 个字符", response.get_data(as_text=True))
+        self.assertFalse((self.root / "config" / "auth.json").exists())
+
+    def test_initialized_container_requires_login_for_new_session(self):
+        self._setup_admin()
+        anonymous = self.app.test_client()
+
+        navigation = anonymous.get("/")
+        api = anonymous.get("/api/state")
+        login = anonymous.get("/auth/login")
+
+        self.assertEqual(navigation.status_code, 302)
+        self.assertTrue(navigation.headers["Location"].startswith("/auth/login"))
+        self.assertEqual(api.status_code, 401)
+        self.assertEqual(api.get_json()["code"], "authentication_required")
+        self.assertEqual(login.status_code, 200)
+        self.assertIn("登录", login.get_data(as_text=True))
+
+    def test_login_rejects_wrong_credentials_and_accepts_correct_credentials(self):
+        self._setup_admin()
+        client = self.app.test_client()
+        csrf = self._csrf_from_with_client(client, "/auth/login")
+
+        rejected = client.post("/auth/login", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "wrong password",
+        })
+        self.assertEqual(rejected.status_code, 401)
+        self.assertIn("用户名或密码错误", rejected.get_data(as_text=True))
+
+        csrf = self._csrf_from_with_client(client, "/auth/login")
+        accepted = client.post("/auth/login", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "correct horse battery",
+            "next": "https://example.invalid/escape",
+        })
+        self.assertEqual(accepted.status_code, 302)
+        self.assertEqual(accepted.headers["Location"], "/")
+        index = client.get("/")
+        self.assertEqual(index.status_code, 200)
+        index.close()
+
+    def test_logout_clears_authenticated_session(self):
+        self._setup_admin()
+        status = self.client.get("/api/auth/status")
+        self.assertEqual(status.status_code, 200)
+        payload = status.get_json()
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["username"], "owner")
+
+        response = self.client.post("/auth/logout", data={"csrf_token": payload["csrf_token"]})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.headers["Location"].startswith("/auth/login"))
+        self.assertEqual(self.client.get("/api/state").status_code, 401)
+
+    def test_setup_cannot_replace_existing_admin(self):
+        original_csrf = self._setup_admin()
+        auth_path = self.root / "config" / "auth.json"
+        original = auth_path.read_bytes()
+
+        response = self.client.post("/auth/setup", data={
+            "csrf_token": original_csrf,
+            "username": "replacement",
+            "password": "replacement password",
+            "password_confirm": "replacement password",
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.headers["Location"].startswith("/auth/login"))
+        self.assertEqual(auth_path.read_bytes(), original)
+
+    def _csrf_from_with_client(self, client, path):
+        response = client.get(path)
+        self.assertEqual(response.status_code, 200)
+        match = re.search(r'name="csrf_token" value="([^"]+)"', response.get_data(as_text=True))
+        response.close()
+        self.assertIsNotNone(match)
+        return match.group(1)
+
+    def test_corrupt_auth_record_fails_closed_without_path_disclosure(self):
+        auth_path = self.root / "config" / "auth.json"
+        auth_path.write_text("{not-json", encoding="utf-8")
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertEqual(payload["code"], "authentication_unavailable")
+        self.assertNotIn(str(self.root), response.get_data(as_text=True))
+
+    def test_disabled_auth_preserves_anonymous_local_mode(self):
+        local_root = self.root / "local"
+        runtime = RuntimeEnvironment(
+            mode="local",
+            input_root=None,
+            workspace_dir=local_root / "workspace",
+            output_dir=local_root / "output",
+            archive_dir=local_root / "archive",
+            local_config_path=local_root / "config" / "config.yaml",
+            host="127.0.0.1",
+            native_picker=True,
+        )
+        app = create_app({"TESTING": True, "runtime_environment": runtime, "auth_enabled": False})
+        client = app.test_client()
+        try:
+            index = client.get("/")
+            status = client.get("/api/auth/status")
+            login = client.get("/auth/login")
+
+            self.assertEqual(index.status_code, 200)
+            self.assertEqual(status.get_json(), {"enabled": False})
+            self.assertEqual(login.status_code, 404)
+            index.close()
+        finally:
+            app.extensions["timelapse_tasks"].shutdown()
 
 
 if __name__ == "__main__":

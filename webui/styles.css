@@ -71,7 +71,7 @@
 html { min-width: 320px; max-width: 100%; height: 100%; background: var(--bg); overflow: hidden; }
 body { max-width: 100%; height: 100%; margin: 0; color: var(--text); background: var(--bg); overflow: hidden; overflow-x: hidden; }
 button, input, select { font: inherit; letter-spacing: 0; }
-button, select, input[type="number"], input[type="text"] {
+button, select, input[type="number"], input[type="text"], input[type="password"] {
   min-height: 34px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -85,7 +85,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
-input[type="number"], input[type="text"], select { width: 100%; padding: 5px 8px; }
+input[type="number"], input[type="text"], input[type="password"], select { width: 100%; padding: 5px 8px; }
 input[type="range"] { width: 100%; accent-color: var(--accent); }
 h1, h2, h3, p { margin-top: 0; letter-spacing: 0; }
 h1 { margin-bottom: 4px; font-size: 18px; }
@@ -117,6 +117,8 @@ h3 { margin-bottom: 0; font-size: 14px; }
 .brand-block strong { font-size: 16px; white-space: nowrap; }
 .path-label { min-width: 0; color: var(--muted); overflow: hidden; overflow-wrap: anywhere; text-overflow: ellipsis; white-space: nowrap; }
 .header-tools { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.logout-button { color: var(--muted); }
+.logout-button[hidden] { display: none; }
 .preference-choice { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-alt); }
 .preference-icon { width: 31px; min-width: 31px; min-height: 28px; padding: 0; color: var(--muted); border-color: transparent; background: transparent; font-size: 16px; }
 .preference-icon.language-icon { width: 34px; min-width: 34px; font-size: 12px; font-weight: 700; }
@@ -187,6 +189,17 @@ h3 { margin-bottom: 0; font-size: 14px; }
 .status-pill[data-status="exported"] { color: var(--warning); background: var(--warning-soft); }
 .status-pill[data-status="archived"] { color: var(--accent-hover); background: var(--accent-soft); }
 .status-pill[data-status="cancelling"], .status-pill[data-status="cancelled"] { color: var(--warning); background: var(--warning-soft); }
+
+.auth-page { display: grid; place-items: center; min-height: 100%; padding: 24px; overflow: auto; }
+.auth-shell { width: min(100%, 420px); }
+.auth-card { padding: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.auth-brand { margin-bottom: 20px; color: var(--accent); font-weight: 700; letter-spacing: 0.02em; }
+.auth-help { margin: 8px 0 20px; color: var(--muted); line-height: 1.6; }
+.auth-error { padding: 10px 12px; color: var(--danger); border: 1px solid var(--danger); border-radius: var(--radius); background: var(--danger-soft); }
+.auth-form { display: grid; gap: 9px; }
+.auth-form label { margin-top: 6px; font-weight: 600; }
+.auth-form input { min-height: 40px; }
+.auth-form button { min-height: 40px; margin-top: 12px; }
 
 .source-band, .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .source-band { grid-column: 2; grid-row: 2; }

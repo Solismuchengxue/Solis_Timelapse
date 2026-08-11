@@ -16,6 +16,7 @@ __pycache__/
 *.log
 *.concat.txt
 config/local.yaml
+config/auth.json
 .env
 workspace/*
 !workspace/.gitkeep

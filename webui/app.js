@@ -29,7 +29,9 @@ const API = Object.freeze({
   logs: "/api/logs",
   settings: "/api/settings",
   colorPresets: "/api/color-presets",
-  colorPreset: (id) => `/api/color-presets/${encodeURIComponent(id)}`
+  colorPreset: (id) => `/api/color-presets/${encodeURIComponent(id)}`,
+  authStatus: "/api/auth/status",
+  logout: "/auth/logout"
 });
 
 const ACTIVE_TASK_STATES = new Set(["queued", "running", "cancelling"]);
@@ -67,6 +69,26 @@ const state = {
   capabilities: { mode: "local", native_directory_picker: true, directory_browser: false },
   directoryBrowserPath: ""
 };
+
+async function configureAuthentication() {
+  const auth = await api(API.authStatus);
+  const button = byId("logout-btn");
+  button.hidden = !auth.enabled;
+  button.dataset.csrfToken = auth.csrf_token || "";
+}
+
+function logout() {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = API.logout;
+  const token = document.createElement("input");
+  token.type = "hidden";
+  token.name = "csrf_token";
+  token.value = byId("logout-btn").dataset.csrfToken || "";
+  form.appendChild(token);
+  document.body.appendChild(form);
+  form.submit();
+}
 
 const byId = (id) => document.getElementById(id);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -2234,6 +2256,7 @@ function bindEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
   byId("app").querySelector('[role="tablist"]').addEventListener("keydown", handleTabKeydown);
   byId("dismiss-error-btn").addEventListener("click", clearError);
+  byId("logout-btn").addEventListener("click", logout);
   byId("pick-source-btn").addEventListener("click", pickDirectory);
   byId("scan-btn").addEventListener("click", scanSource);
   byId("clear-project-btn").addEventListener("click", openClearProjectDialog);
@@ -2335,7 +2358,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   syncPreferenceControls();
   translateDocument();
   bindEvents();
-  try { await Promise.all([loadCapabilities(), loadColorPresets()]); } catch (error) { showError(error); }
+  try { await Promise.all([loadCapabilities(), loadColorPresets(), configureAuthentication()]); } catch (error) { showError(error); }
   renderFrameStrip();
   updateHdrModeFields();
   renderHdr();

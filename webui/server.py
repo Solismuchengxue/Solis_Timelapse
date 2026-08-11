@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -20,13 +22,14 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
 import numpy as np
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, jsonify, redirect, render_template, request, send_file, send_from_directory, session
 from PIL import Image
 from werkzeug.exceptions import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import archive, config_io, hdr_merge, image_ops, image_pipeline, media_catalog, video_export
+from src.auth import AuthStateError, AuthStore
 from src.instance_guard import InstanceAlreadyRunning, InstanceGuard
 from src.project_store import ProjectStore
 from src.runtime_env import (
@@ -453,6 +456,54 @@ def create_app(overrides: dict | None = None) -> Flask:
     app.extensions["timelapse_tasks"] = tasks
     app.extensions["solis_runtime"] = runtime_environment
 
+    auth_enabled = bool(runtime.get("auth_enabled", runtime_environment.mode == "container"))
+    auth_path = Path(runtime.get(
+        "auth_path",
+        runtime_environment.local_config_path.parent / "auth.json",
+    )).resolve()
+    auth_store = AuthStore(auth_path)
+    app.extensions["solis_auth"] = auth_store
+    try:
+        auth_record = auth_store.load()
+    except AuthStateError:
+        auth_record = None
+    app.secret_key = auth_record.session_secret if auth_record else secrets.token_urlsafe(32)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=False,
+    )
+
+    def csrf_token() -> str:
+        token = session.get("csrf_token")
+        if not isinstance(token, str):
+            token = secrets.token_urlsafe(32)
+            session["csrf_token"] = token
+        return token
+
+    @app.before_request
+    def require_authentication():
+        if (
+            not auth_enabled
+            or request.path == "/api/health"
+            or request.path.startswith("/auth/")
+            or request.path in {"/styles.css", "/ui_prefs.js"}
+        ):
+            return None
+        try:
+            record = auth_store.load()
+        except AuthStateError:
+            return _error("认证状态不可读取", "authentication_unavailable", 503)
+        if record is not None and session.get("authenticated_username") == record.username:
+            return None
+        if record is not None:
+            if request.path.startswith(("/api/", "/media/")):
+                return _error("需要登录", "authentication_required", 401)
+            return redirect(f"/auth/login?next={request.path}")
+        if request.path.startswith(("/api/", "/media/")):
+            return _error("需要先初始化管理员", "authentication_required", 401)
+        return redirect("/auth/setup")
+
     def active_task() -> bool:
         return tasks.snapshot().get("status") in ACTIVE_STATES
 
@@ -477,6 +528,160 @@ def create_app(overrides: dict | None = None) -> Flask:
         if project is None:
             raise ApiError("当前没有项目", "project_missing", 400)
         return project
+
+    @app.get("/auth/setup")
+    def auth_setup_form():
+        if not auth_enabled:
+            return _error("资源不存在", "not_found", 404)
+        try:
+            if auth_store.load() is not None:
+                return redirect("/auth/login")
+        except AuthStateError:
+            return _error("认证状态不可读取", "authentication_unavailable", 503)
+        return render_template(
+            "auth.html",
+            mode="setup",
+            error=None,
+            username="",
+            csrf_token=csrf_token(),
+        )
+
+    @app.post("/auth/setup")
+    def auth_setup_submit():
+        if not auth_enabled:
+            return _error("资源不存在", "not_found", 404)
+        try:
+            if auth_store.load() is not None:
+                return redirect("/auth/login")
+        except AuthStateError:
+            return _error("认证状态不可读取", "authentication_unavailable", 503)
+        expected_csrf = session.get("csrf_token")
+        provided_csrf = request.form.get("csrf_token", "")
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        password_confirm = request.form.get("password_confirm", "")
+        if (
+            not isinstance(expected_csrf, str)
+            or not hmac.compare_digest(expected_csrf, provided_csrf)
+        ):
+            return render_template(
+                "auth.html",
+                mode="setup",
+                error="页面已过期，请重新提交。",
+                username=username,
+                csrf_token=csrf_token(),
+            ), 400
+        if password != password_confirm:
+            return render_template(
+                "auth.html",
+                mode="setup",
+                error="两次输入的密码不一致。",
+                username=username,
+                csrf_token=csrf_token(),
+            ), 400
+        try:
+            record = auth_store.initialize(username, password)
+        except AuthStateError:
+            return render_template(
+                "auth.html",
+                mode="setup",
+                error="用户名需为 1–64 个字符，密码需为 8–256 个字符。",
+                username=username,
+                csrf_token=csrf_token(),
+            ), 400
+        app.secret_key = record.session_secret
+        session.clear()
+        session["authenticated_username"] = record.username
+        return redirect("/")
+
+    @app.get("/auth/login")
+    def auth_login_form():
+        if not auth_enabled:
+            return _error("资源不存在", "not_found", 404)
+        try:
+            record = auth_store.load()
+        except AuthStateError:
+            return _error("认证状态不可读取", "authentication_unavailable", 503)
+        if record is None:
+            return redirect("/auth/setup")
+        if session.get("authenticated_username") == record.username:
+            return redirect("/")
+        return render_template(
+            "auth.html",
+            mode="login",
+            error=None,
+            username="",
+            csrf_token=csrf_token(),
+            next_path=request.args.get("next", ""),
+        )
+
+    @app.post("/auth/login")
+    def auth_login_submit():
+        if not auth_enabled:
+            return _error("资源不存在", "not_found", 404)
+        try:
+            record = auth_store.load()
+        except AuthStateError:
+            return _error("认证状态不可读取", "authentication_unavailable", 503)
+        if record is None:
+            return redirect("/auth/setup")
+        expected_csrf = session.get("csrf_token")
+        provided_csrf = request.form.get("csrf_token", "")
+        username = request.form.get("username", "")
+        next_path = request.form.get("next", "")
+        if (
+            not isinstance(expected_csrf, str)
+            or not hmac.compare_digest(expected_csrf, provided_csrf)
+        ):
+            return render_template(
+                "auth.html",
+                mode="login",
+                error="页面已过期，请重新提交。",
+                username=username,
+                csrf_token=csrf_token(),
+                next_path=next_path,
+            ), 400
+        if not auth_store.verify(username, request.form.get("password", "")):
+            return render_template(
+                "auth.html",
+                mode="login",
+                error="用户名或密码错误。",
+                username=username,
+                csrf_token=csrf_token(),
+                next_path=next_path,
+            ), 401
+        session.clear()
+        session["authenticated_username"] = record.username
+        destination = next_path if next_path.startswith("/") and not next_path.startswith("//") else "/"
+        return redirect(destination)
+
+    @app.get("/api/auth/status")
+    def auth_status():
+        if not auth_enabled:
+            return jsonify({"enabled": False})
+        try:
+            record = auth_store.load()
+        except AuthStateError:
+            return _error("认证状态不可读取", "authentication_unavailable", 503)
+        return jsonify({
+            "enabled": True,
+            "username": record.username if record else None,
+            "csrf_token": csrf_token(),
+        })
+
+    @app.post("/auth/logout")
+    def auth_logout():
+        if not auth_enabled:
+            return _error("资源不存在", "not_found", 404)
+        expected_csrf = session.get("csrf_token")
+        provided_csrf = request.form.get("csrf_token", "")
+        if (
+            not isinstance(expected_csrf, str)
+            or not hmac.compare_digest(expected_csrf, provided_csrf)
+        ):
+            return _error("页面已过期，请重新提交", "invalid_csrf", 400)
+        session.clear()
+        return redirect("/auth/login")
 
     def frame_source_path(project: dict, segment: dict, frame_index: int) -> Path:
         frames = segment.get("frames", [])

@@ -107,7 +107,7 @@ https://github.com/Solismuchengxue/Solis_Timelapse
   workspace/              # 分析、缩略图、渲染帧和任务状态
   output/                 # 导出的 MP4 和 HDR 照片
   archive/                # 已归档的原片、配方和最终成片
-  config/                 # WebUI 保存的本地设置
+  config/                 # WebUI 设置及 fnOS 管理员认证状态
 ```
 
 Compose 配置和四个数据目录都位于 `Solis_Timelapse` 根目录。更新 Compose 时不要删除 `workspace`、`output`、`archive` 或 `config`。
@@ -127,7 +127,7 @@ PGID=1000
 - `APP_ROOT`：上一步创建的 `Solis_Timelapse` 根目录，其中保存 Compose 配置和四个应用数据目录。
 - `PUID`、`PGID`：用于运行容器的飞牛用户 UID 和 GID，必须对四个数据目录有写权限，并对照片目录有读取权限。
 
-容器使用镜像内的默认配置启动。用户在 WebUI 保存设置后，会在宿主机生成 `${APP_ROOT}/config/config.yaml`；目录初次部署时为空是正常的。Windows 本地开发使用的 `config/local.yaml` 不会用于 Docker。
+容器使用镜像内的默认配置启动。用户在 WebUI 保存设置后，会在宿主机生成 `${APP_ROOT}/config/config.yaml`；首次初始化管理员后，还会生成 `${APP_ROOT}/config/auth.json`。Windows 本地开发使用的 `config/local.yaml` 不会用于 Docker。
 
 通过 SSH 执行下面命令可以查询当前用户的 UID 和 GID：
 
@@ -205,7 +205,7 @@ services:
 5. 如果界面提供 Compose 编辑器，确认显示的是仓库中的 `compose.yaml` 内容；某些版本没有自动识别 `compose.yaml` 时，可新建 Compose 项目并把上面的 YAML 完整粘贴进去。
 6. 点击“部署”“创建”或“确定”。第一次会从 GHCR 下载已经构建好的镜像，不会在飞牛上安装 Python 依赖。
 7. 在“容器”页面确认 `solis_timelapse` 状态为“运行中”或“健康”。
-8. 浏览器访问 `http://飞牛IP:9501/`。
+8. 浏览器访问 `http://飞牛IP:9501/`。首次访问会显示“初始化管理员”，创建账号后才能进入工作台；后续访问显示登录页。
 
 进入 WebUI 后，容器只能浏览 `.env` 中 `INPUT_PATH` 对应的照片目录。页面里看到的是容器路径 `/media/input`，不能浏览飞牛上的其他目录，这是只读边界的正常表现。
 
@@ -274,7 +274,21 @@ docker compose ps
 
 仅执行 `docker compose restart` 不会拉取新镜像。必须先执行 `docker compose pull`，再执行 `docker compose up -d`。宿主机上的 `workspace`、`output`、`archive` 和 `config` 不会因更新镜像而丢失。
 
-### 10. 常见问题
+### 10. 管理员登录与密码重置
+
+登录保护只在 fnOS/Docker 容器模式启用；Windows 双击 `run.bat` 的本地模式保持原有的免登录行为。管理员密码不会以明文保存，`config/auth.json` 中只保存加盐哈希和会话密钥，因此无法从文件中读回原密码。
+
+忘记密码时，在可信的 fnOS 管理环境中执行：
+
+```bash
+cd /vol1/1000/Solis_Timelapse
+mv config/auth.json config/auth.json.bak
+docker compose restart
+```
+
+然后重新打开页面并创建管理员。确认新账号可正常登录后，再自行决定是否删除 `config/auth.json.bak`。重置认证文件不会删除 `workspace`、`output`、`archive` 或 `config/config.yaml`；由于没有一次性初始化码，重置后的首次管理员创建只能在可信局域网中完成。
+
+### 11. 常见问题
 
 **拉取镜像时提示 denied 或 unauthorized**
 
@@ -329,4 +343,4 @@ archive/YYYY-MM-DD_HHMMSS/
 
 ## 网络安全
 
-WebUI 的 `9501` 端口目前没有登录认证，只应在可信局域网中使用，**不要直接暴露到公网**。需要远程访问时，请使用 VPN，或在带身份认证的反向代理后访问。
+fnOS/Docker 模式的 WebUI 使用应用内管理员登录，会话 Cookie 设置为 HttpOnly 和 SameSite=Lax。首次初始化不使用一次性初始化码，因此必须在可信局域网内完成。`9501` 仍是明文 HTTP，**不要直接暴露到公网**；需要远程访问时，请使用 VPN，或在启用 HTTPS 的反向代理后访问。
