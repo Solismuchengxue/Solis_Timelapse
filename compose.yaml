@@ -1,3 +1,5 @@
+name: solis_timelapse
+
 services:
   solis_timelapse:
     image: ghcr.io/solismuchengxue/solis_timelapse:latest

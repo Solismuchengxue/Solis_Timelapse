@@ -582,13 +582,17 @@ class WebUiStaticContractTests(unittest.TestCase):
         for token in (
             "Solis_Timelapse", "run.bat", "docker compose", "INPUT_PATH",
             "APP_ROOT", "/media/input:ro", "PUID", "PGID",
-            "/vol1/1000/solis_timelapse", "9501", "不要直接暴露到公网",
+            "/vol1/1000/Solis_Timelapse", "9501", "不要直接暴露到公网",
             "ghcr.io/solismuchengxue/solis_timelapse:latest", "GitHub Actions",
             "飞牛图形界面部署", "SSH 命令部署", "docker compose config",
             "docker compose pull", "docker compose logs", "docker compose ps", "9501:9501",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, readme)
+        self.assertNotIn("/vol1/1000/solis_timelapse", readme)
+        self.assertNotIn("/vol1/1000/Solis_Timelapse/app", readme)
+        self.assertNotIn("compose.build.yaml", readme)
+        self.assertNotIn("本地构建备用方案", readme)
         for internal_token in (
             "F:\\01_Project", "migrate_to_new_path.bat", "DEVLOG.md",
             "PLAYBOOK.md", ".codex", "junction",

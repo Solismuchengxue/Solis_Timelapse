@@ -13,6 +13,7 @@ class DockerContractTests(unittest.TestCase):
         service = compose["services"]["solis_timelapse"]
         volumes = service["volumes"]
 
+        self.assertEqual(compose["name"], "solis_timelapse")
         self.assertEqual(service["image"], "ghcr.io/solismuchengxue/solis_timelapse:latest")
         self.assertEqual(service["pull_policy"], "always")
         self.assertNotIn("build", service)
@@ -31,14 +32,8 @@ class DockerContractTests(unittest.TestCase):
         self.assertNotIn("/var/run/docker.sock", "\n".join(volumes))
         self.assertEqual(service["restart"], "unless-stopped")
 
-    def test_local_build_compose_remains_available_as_fallback(self):
-        compose = yaml.safe_load((ROOT / "compose.build.yaml").read_text(encoding="utf-8"))
-        service = compose["services"]["solis_timelapse"]
-
-        self.assertEqual(service["image"], "solis_timelapse:local")
-        self.assertEqual(service["build"], ".")
-        self.assertNotIn("pull_policy", service)
-        self.assertEqual(service["ports"], ["9501:9501"])
+    def test_deployment_has_no_local_build_compose(self):
+        self.assertFalse((ROOT / "compose.build.yaml").exists())
 
     def test_github_actions_publishes_amd64_image_to_ghcr(self):
         workflow_path = ROOT / ".github" / "workflows" / "docker-publish.yml"
@@ -75,7 +70,7 @@ class DockerContractTests(unittest.TestCase):
 
         self.assertEqual(values, {
             "INPUT_PATH": "/vol1/1000/照片/延时摄影",
-            "APP_ROOT": "/vol1/1000/solis_timelapse",
+            "APP_ROOT": "/vol1/1000/Solis_Timelapse",
             "PUID": "1000",
             "PGID": "1000",
         })

@@ -65,7 +65,7 @@ HDR 最适合同一机位、短时间内拍摄的包围曝光。直接选择延�
 
 ### 先看镜像说明
 
-项目通过 GitHub Actions 自动构建并发布 AMD64 镜像，飞牛默认直接拉取：
+项目只通过 GitHub Actions 自动构建并发布 AMD64 镜像，飞牛部署只拉取已发布的 GHCR 镜像，不在飞牛或其他部署主机上本地构建：
 
 ```text
 ghcr.io/solismuchengxue/solis_timelapse:latest
@@ -83,7 +83,7 @@ ghcr.io/solismuchengxue/solis_timelapse:latest
 
 ```text
 照片目录：/vol1/1000/照片/延时摄影
-应用目录：/vol1/1000/solis_timelapse
+应用目录：/vol1/1000/Solis_Timelapse
 ```
 
 `/vol1/1000` 只是示例。存储池编号和用户 UID 不同时，必须替换为飞牛显示的真实路径；不要求存在 `/vol1/1000/docker`。
@@ -96,36 +96,35 @@ ghcr.io/solismuchengxue/solis_timelapse:latest
 https://github.com/Solismuchengxue/Solis_Timelapse
 ```
 
-默认使用 GHCR 镜像时，只需要把压缩包中的 `compose.yaml` 和 `.env.example` 上传到 `/vol1/1000/solis_timelapse/app`，不需要把完整源码放到飞牛。
+默认使用 GHCR 镜像时，只需要把压缩包中的 `compose.yaml` 和 `.env.example` 上传到 `/vol1/1000/Solis_Timelapse`，不需要把完整源码放到飞牛。
 
 推荐目录结构如下：
 
 ```text
-/vol1/1000/solis_timelapse/
-  app/                    # Compose 项目目录
-    compose.yaml
-    .env.example
+/vol1/1000/Solis_Timelapse/
+  compose.yaml            # Compose 配置
+  .env.example            # 环境变量示例
   workspace/              # 分析、缩略图、渲染帧和任务状态
   output/                 # 导出的 MP4 和 HDR 照片
   archive/                # 已归档的原片、配方和最终成片
   config/                 # WebUI 保存的本地设置
 ```
 
-`app` 只保存部署配置；另外四个数据目录不要放进 `app`，更新 Compose 时也不要删除。
+Compose 配置和四个数据目录都位于 `Solis_Timelapse` 根目录。更新 Compose 时不要删除 `workspace`、`output`、`archive` 或 `config`。
 
 ### 3. 创建 `.env`
 
-将 `app/.env.example` 复制为 `app/.env`，修改为实际值：
+将项目根目录中的 `.env.example` 复制为 `.env`，修改为实际值：
 
 ```dotenv
 INPUT_PATH=/vol1/1000/照片/延时摄影
-APP_ROOT=/vol1/1000/solis_timelapse
+APP_ROOT=/vol1/1000/Solis_Timelapse
 PUID=1000
 PGID=1000
 ```
 
 - `INPUT_PATH`：原始照片目录。容器内固定挂载为 `/media/input:ro`，其中 `ro` 表示只读。
-- `APP_ROOT`：上一步创建的应用数据根目录，不是 `app` 源码目录。
+- `APP_ROOT`：上一步创建的 `Solis_Timelapse` 根目录，其中保存 Compose 配置和四个应用数据目录。
 - `PUID`、`PGID`：用于运行容器的飞牛用户 UID 和 GID，必须对四个数据目录有写权限，并对照片目录有读取权限。
 
 容器使用镜像内的默认配置启动。用户在 WebUI 保存设置后，会在宿主机生成 `${APP_ROOT}/config/config.yaml`；目录初次部署时为空是正常的。Windows 本地开发使用的 `config/local.yaml` 不会用于 Docker。
@@ -138,7 +137,7 @@ id
 
 输出中的 `uid=数字` 填入 `PUID`，`gid=数字` 填入 `PGID`。示例管理员通常是 `1000:1000`，但应以实际输出为准。
 
-没有使用 SSH 时，可以在电脑上编辑 `.env.example`，另存为文件名 `.env` 后上传到 `app`。注意不能变成 `.env.txt`。
+没有使用 SSH 时，可以在电脑上编辑 `.env.example`，另存为文件名 `.env` 后上传到 `Solis_Timelapse` 根目录。注意不能变成 `.env.txt`。
 
 ### 4. 设置目录权限
 
@@ -147,11 +146,11 @@ id
 遇到 `Permission denied` 时，可通过 SSH 按实际 UID/GID 修复：
 
 ```bash
-sudo chown -R 1000:1000 /vol1/1000/solis_timelapse/workspace
-sudo chown -R 1000:1000 /vol1/1000/solis_timelapse/output
-sudo chown -R 1000:1000 /vol1/1000/solis_timelapse/archive
-sudo chown -R 1000:1000 /vol1/1000/solis_timelapse/config
-sudo chmod -R u+rwX /vol1/1000/solis_timelapse/workspace /vol1/1000/solis_timelapse/output /vol1/1000/solis_timelapse/archive /vol1/1000/solis_timelapse/config
+sudo chown -R 1000:1000 /vol1/1000/Solis_Timelapse/workspace
+sudo chown -R 1000:1000 /vol1/1000/Solis_Timelapse/output
+sudo chown -R 1000:1000 /vol1/1000/Solis_Timelapse/archive
+sudo chown -R 1000:1000 /vol1/1000/Solis_Timelapse/config
+sudo chmod -R u+rwX /vol1/1000/Solis_Timelapse/workspace /vol1/1000/Solis_Timelapse/output /vol1/1000/Solis_Timelapse/archive /vol1/1000/Solis_Timelapse/config
 ```
 
 这里的 `1000:1000` 和路径都必须替换为自己的实际值。不要对照片目录执行递归写权限修改，Solis_Timelapse 不需要写入原片目录。
@@ -161,6 +160,8 @@ sudo chmod -R u+rwX /vol1/1000/solis_timelapse/workspace /vol1/1000/solis_timela
 仓库自带的 `compose.yaml` 可以直接使用：
 
 ```yaml
+name: solis_timelapse
+
 services:
   solis_timelapse:
     image: ghcr.io/solismuchengxue/solis_timelapse:latest
@@ -183,6 +184,7 @@ services:
 
 关键配置含义：
 
+- `name: solis_timelapse`：固定 Compose 项目名，不再使用配置文件所在目录名。
 - `image`：从 GitHub Container Registry 拉取项目官方镜像。
 - `pull_policy: always`：每次创建或更新容器前检查 `latest` 是否有新版本。
 - `user`：使用飞牛真实 UID/GID 运行，不使用 root。
@@ -199,7 +201,7 @@ services:
 1. 打开“Docker” → “Compose”。
 2. 点击“新建项目”或“导入项目”。
 3. 项目名称填写 `solis_timelapse`。
-4. 项目路径选择 `/vol1/1000/solis_timelapse/app`，该目录内必须同时存在 `compose.yaml` 和 `.env`。
+4. 项目路径选择 `/vol1/1000/Solis_Timelapse`，该目录内必须同时存在 `compose.yaml` 和 `.env`。
 5. 如果界面提供 Compose 编辑器，确认显示的是仓库中的 `compose.yaml` 内容；某些版本没有自动识别 `compose.yaml` 时，可新建 Compose 项目并把上面的 YAML 完整粘贴进去。
 6. 点击“部署”“创建”或“确定”。第一次会从 GHCR 下载已经构建好的镜像，不会在飞牛上安装 Python 依赖。
 7. 在“容器”页面确认 `solis_timelapse` 状态为“运行中”或“健康”。
@@ -212,7 +214,7 @@ services:
 已经启用 SSH 时，可直接执行：
 
 ```bash
-cd /vol1/1000/solis_timelapse/app
+cd /vol1/1000/Solis_Timelapse
 
 # 检查 .env 是否被正确读取，并展开最终 Compose 配置
 docker compose config
@@ -234,7 +236,7 @@ docker compose logs --tail=100 -f
 
 ### 8. 日常管理
 
-在 `app` 目录执行：
+在 `Solis_Timelapse` 根目录执行：
 
 ```bash
 # 查看状态
@@ -263,7 +265,7 @@ docker compose down
 GitHub Actions 发布新版镜像后，在飞牛 Compose 页面执行“拉取/重新部署”，或通过 SSH 执行：
 
 ```bash
-cd /vol1/1000/solis_timelapse/app
+cd /vol1/1000/Solis_Timelapse
 docker compose config
 docker compose pull
 docker compose up -d
@@ -272,19 +274,7 @@ docker compose ps
 
 仅执行 `docker compose restart` 不会拉取新镜像。必须先执行 `docker compose pull`，再执行 `docker compose up -d`。宿主机上的 `workspace`、`output`、`archive` 和 `config` 不会因更新镜像而丢失。
 
-### 10. 本地构建备用方案
-
-GHCR 暂时无法访问，或需要测试未发布源码时，才使用仓库中的 `compose.build.yaml`。此方式必须把完整源码上传到 `app`，然后执行：
-
-```bash
-cd /vol1/1000/solis_timelapse/app
-docker compose -f compose.build.yaml config
-docker compose -f compose.build.yaml up -d --build
-```
-
-本地构建会在飞牛上下载 `python:3.12-slim`、安装 Python 依赖并生成 `solis_timelapse:local`，通常明显慢于直接拉取 GHCR 镜像。
-
-### 11. 常见问题
+### 10. 常见问题
 
 **拉取镜像时提示 denied 或 unauthorized**
 
@@ -292,7 +282,7 @@ docker compose -f compose.build.yaml up -d --build
 
 **拉取 GHCR 很慢或连接失败**
 
-这是飞牛到 `ghcr.io` 的网络问题，不是照片处理问题。可稍后重试；长期无法访问时使用上一节的本地构建备用方案。不要把来源不明的镜像代理地址写进 Compose。
+这是飞牛到 `ghcr.io` 的网络问题，不是照片处理问题。保留当前正常运行的容器，检查 GitHub Packages 状态和飞牛网络后再重试。部署只使用 GHCR 已发布镜像；不要在飞牛本地构建，也不要把来源不明的镜像代理地址写进 Compose。
 
 **容器启动后立即退出**
 
