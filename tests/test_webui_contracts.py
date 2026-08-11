@@ -579,16 +579,34 @@ class WebUiStaticContractTests(unittest.TestCase):
 
     def test_user_documentation_covers_windows_and_fnos_deployment(self):
         readme = README_PATH.read_text(encoding="utf-8")
+        english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        design = (ROOT / "DESIGN.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs" / "operations" / "fnos.md").read_text(encoding="utf-8")
         for token in (
             "Solis_Timelapse", "run.bat", "docker compose", "INPUT_PATH",
             "APP_ROOT", "/media/input:ro", "PUID", "PGID",
             "/vol1/1000/Solis_Timelapse", "9501", "不要直接暴露到公网",
             "ghcr.io/solismuchengxue/solis_timelapse:sha-887a557", "GitHub Actions",
-            "飞牛图形界面部署", "SSH 命令部署", "docker compose config",
-            "docker compose pull", "docker compose logs", "docker compose ps", "9501:9501",
+            "docs/operations/fnos.md", "docs/architecture.md", "docs/verification.md",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, readme)
+        for token in (
+            "飞牛图形界面部署", "SSH 命令部署", "docker compose config",
+            "docker compose pull", "docker compose logs", "docker compose ps", "9501:9501",
+            "mv config/auth.json config/auth.json.bak",
+        ):
+            with self.subTest(runbook_token=token):
+                self.assertIn(token, runbook)
+        for token in (
+            "Solis_Timelapse", "run.bat", "docker compose", "sha-887a557",
+            "AMD64", "127.0.0.1", "docs/architecture.md", "docs/verification.md",
+        ):
+            with self.subTest(english_token=token):
+                self.assertIn(token, english)
+        for token in ("状态：accepted", "docs/architecture.md", "docs/operations/fnos.md", "docs/verification.md"):
+            with self.subTest(design_token=token):
+                self.assertIn(token, design)
         self.assertNotIn("/vol1/1000/solis_timelapse", readme)
         self.assertNotIn("/vol1/1000/Solis_Timelapse/app", readme)
         self.assertNotIn("compose.build.yaml", readme)

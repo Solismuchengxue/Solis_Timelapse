@@ -92,12 +92,14 @@ class DockerContractTests(unittest.TestCase):
 
     def test_fnos_authentication_and_reset_are_documented(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs" / "operations" / "fnos.md").read_text(encoding="utf-8")
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
         self.assertIn("首次访问会显示“初始化管理员”", readme)
-        self.assertIn("mv config/auth.json config/auth.json.bak", readme)
         self.assertIn("Windows 双击 `run.bat` 的本地模式保持原有的免登录行为", readme)
-        self.assertIn("`9501` 仍是明文 HTTP", readme)
+        self.assertIn("docs/operations/fnos.md", readme)
+        self.assertIn("mv config/auth.json config/auth.json.bak", runbook)
+        self.assertIn("`9501` 仍是明文 HTTP", runbook)
         self.assertIn("config/auth.json", gitignore)
 
     def test_entrypoint_has_fail_fast_validation_contract(self):
