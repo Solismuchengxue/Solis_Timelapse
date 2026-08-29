@@ -89,7 +89,18 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 
 静态演示只证明 WebUI 的展示与核心交互契约，不证明 Flask、图像管线、FFmpeg、Docker 容器或真实文件处理正在运行。
 
-## 6. 历史 fnOS 验收边界
+## 6. 2026-08-29 fnOS 部署验收
+
+固定镜像 `sha-6f4a766` 已部署到指定 fnOS Compose 项目。现场证据包括：
+
+- 容器状态为 `healthy`、重启计数为 0；Compose 标签、OCI revision `6f4a7666951a6a0d678682c6ddc99238ed26d7af` 和 GHCR digest `sha256:e4f10d54d95c6661ebae76621f60f5891ea7b767940a6801339cc28ed23eef88` 相互一致。
+- `/api/health` 返回 `200`，匿名业务 API 返回 `401`，匿名访问 `/auth/password` 跳转登录页。
+- `/favicon.png` 返回 `200 image/png`，现场 SHA-256 `c1be3ef7b7466c9031812a9a4040baca48c70bed37cb571919fd0d83134155ad` 与仓库源图标一致；实际浏览器登录页解析到同一路径。
+- 输入挂载保持只读；`workspace`、`output`、`archive`、`config` 的文件数与字节数均与部署前一致，`auth.json` 与 `config.yaml` 的 SHA-256 未变化，认证文件仍为 `0600` 和 `1000:1000`。
+
+真实管理员账号没有为验收而执行一次实际密码变更，避免无必要地使用户现有会话失效，也不要求用户向自动化提供当前密码。密码校验、原子替换、写失败保留旧记录、新密码登录和跨会话失效由 `tests/test_auth.py` 与 `tests/test_webui_api.py` 覆盖；真实账号改密仍属于用户主动操作。
+
+## 7. 历史 fnOS 验收边界
 
 2026-08-11 对固定镜像 `sha-887a557` 完成过一次 fnOS 现场验收，范围包括：容器 healthy、镜像 revision、首次初始化、登录/退出/重新登录、匿名业务 API 拒绝、输入只读挂载和关键数据基线未变化。
 
@@ -103,7 +114,7 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 
 新部署按 [fnOS 运行手册](operations/fnos.md) 的最小验收清单重新核对。
 
-## 7. 当前未提供的证据
+## 8. 当前未提供的证据
 
 - ARM64 构建与运行验收；
 - TLS、公网部署和外部身份系统集成；
