@@ -117,7 +117,7 @@ flowchart LR
 部署时直接使用 GitHub Actions 发布的 GHCR 镜像，不需要在 Docker 主机上构建源码：
 
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
+ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766
 ```
 
 准备 `/srv/solis_timelapse`，放入仓库的 `compose.yaml` 和 `.env`，并创建 `workspace`、`output`、`archive`、`config` 四个持久化目录。`.env` 至少包含：

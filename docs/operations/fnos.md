@@ -11,10 +11,10 @@
 项目只通过 GitHub Actions 构建并发布 AMD64 镜像。fnOS 只拉取已发布的 GHCR 镜像，不在 NAS 上本地构建：
 
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
+ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766
 ```
 
-不要从 Docker Hub 下载同名第三方镜像。Compose 固定到 `sha-887a557`，不会自动漂移到后续构建。镜像由公开仓库的 `Dockerfile` 构建，可以在 GitHub Actions 和 Packages 页面核对来源。
+不要从 Docker Hub 下载同名第三方镜像。Compose 固定到 `sha-6f4a766`，不会自动漂移到后续构建。镜像由公开仓库的 `Dockerfile` 构建，可以在 GitHub Actions 和 Packages 页面核对来源。
 
 当前 Package 为 Public，可以匿名拉取。自行 Fork 并发布新镜像时，需要在对应 GitHub Packages 设置中确认可见性。
 
@@ -91,7 +91,7 @@ name: solis_timelapse
 
 services:
   solis_timelapse:
-    image: ghcr.io/solismuchengxue/solis_timelapse:sha-887a557
+    image: ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766
     pull_policy: always
     container_name: solis_timelapse
     user: "${PUID:?请在 .env 中设置飞牛用户 UID}:${PGID:?请在 .env 中设置飞牛用户 GID}"
