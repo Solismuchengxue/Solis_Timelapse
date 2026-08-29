@@ -1,7 +1,7 @@
 # 验证与证据
 
 - 状态：accepted
-- 最近核对：2026-08-11
+- 最近核对：2026-08-29
 - 设计入口：[DESIGN.md](../DESIGN.md)
 
 ## 1. 证据层级
@@ -44,15 +44,15 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 
 ## 3. 当前自动化覆盖
 
-截至 2026-08-12，测试源码包含 251 个 Python `unittest` 测试方法。这个数字描述当前测试清单，不代表任意未来工作区已经运行通过。
+截至 2026-08-29，测试源码包含 258 个 Python `unittest` 测试方法。这个数字描述当前测试清单，不代表任意未来工作区已经运行通过。
 
 | 测试文件 | 主要覆盖 |
 | --- | --- |
 | `tests/test_archive.py` | 归档集合、Manifest、哈希、路径和失败行为 |
-| `tests/test_auth.py` | scrypt 密码记录、初始化、验证、损坏状态和原子写入 |
+| `tests/test_auth.py` | scrypt 密码记录、初始化、验证、密码轮换、损坏状态和原子写入 |
 | `tests/test_config_io.py` | 默认配置、本机覆盖和配置写入 |
 | `tests/test_docker_contracts.py` | Compose、固定 GHCR 镜像、AMD64 工作流、挂载、认证文档 |
-| `tests/test_demo_contracts.py` / `test_demo_mock.js` | WebUI 白名单组装、12 张合成媒体、Mock 路由与状态、外部请求拒绝、Pages artifact 边界 |
+| `tests/test_demo_contracts.py` / `test_demo_mock.js` | WebUI 白名单组装、共享浏览器标签图标、12 张合成媒体、Mock 路由与状态、外部请求拒绝、Pages artifact 边界 |
 | `tests/test_end_to_end.py` | 合成 24 帧序列的扫描、处理、导出、归档与源文件哈希不变 |
 | `tests/test_hdr_merge.py` | HDR 对齐、融合、辐射模式、输出和参数边界 |
 | `tests/test_image_ops.py` | 解码、亮度、调色、去闪、设备选择和数值安全 |
@@ -61,7 +61,7 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 | `tests/test_project_store.py` | 项目状态与原子持久化 |
 | `tests/test_task_manager.py` | 单任务、进度、日志、取消、恢复和状态限制 |
 | `tests/test_video_export.py` | H.264/H.265、NVENC、回退、取消、进度和原子输出 |
-| `tests/test_webui_api.py` | API、路径边界、认证、任务和媒体访问 |
+| `tests/test_webui_api.py` | API、路径边界、认证、修改密码、跨会话失效、任务和媒体访问 |
 | `tests/test_webui_contracts.py` / `.js` | 用户界面、国际化、工作流、文档和部署静态契约 |
 
 文件系统和端到端测试使用临时目录与合成数据，不读取用户真实照片库。
@@ -76,7 +76,7 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 | 路径不能逃逸允许根目录 | 当前媒体、归档媒体和容器目录 API 测试 |
 | 无 GPU 时仍可运行 | OpenCL/NVENC 能力检测和 CPU 回退测试 |
 | 部署镜像可追溯 | Compose 固定 `sha-*`、GitHub Actions 标签和合约测试 |
-| 容器业务路由需要登录 | 初始化、登录、退出、会话、API 和媒体路由测试 |
+| 容器业务路由需要登录且密码轮换收回旧会话 | 初始化、登录、退出、修改密码、跨会话失效、API 和媒体路由测试 |
 | 静态演示不访问真实后端或外部网络 | Mock 路由测试、敏感路径扫描、未知路由和跨源请求失败关闭 |
 
 ## 5. 静态演示证据边界

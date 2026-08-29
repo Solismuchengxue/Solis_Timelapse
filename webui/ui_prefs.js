@@ -16,6 +16,7 @@
   const zh = {
     "app.name": "Solis_Timelapse",
     "app.title": "Solis_Timelapse 延时摄影工作台",
+    "auth.change_password": "修改密码",
     "auth.logout": "退出",
     "nav.primary": "主导航",
     "nav.workbench": "工作台",
@@ -354,6 +355,7 @@
   const en = {
     "app.name": "Solis_Timelapse",
     "app.title": "Solis_Timelapse Workbench",
+    "auth.change_password": "Change password",
     "auth.logout": "Log out",
     "nav.primary": "Primary navigation",
     "nav.workbench": "Workbench",

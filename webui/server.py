@@ -47,6 +47,7 @@ from src.task_manager import (
 
 
 WEBUI_DIR = Path(__file__).resolve().parent
+FAVICON_PATH = WEBUI_DIR.parent / "assets" / "watchcow-icon-512.png"
 CURRENT_MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
 ARCHIVE_MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
 RUNTIME_ROOT_KEYS = ("workspace_dir", "output_dir", "archive_dir")
@@ -487,7 +488,7 @@ def create_app(overrides: dict | None = None) -> Flask:
             not auth_enabled
             or request.path == "/api/health"
             or request.path.startswith("/auth/")
-            or request.path in {"/styles.css", "/ui_prefs.js"}
+            or request.path in {"/favicon.png", "/styles.css", "/ui_prefs.js"}
         ):
             return None
         try:
@@ -610,6 +611,11 @@ def create_app(overrides: dict | None = None) -> Flask:
             "auth.html",
             mode="login",
             error=None,
+            success=(
+                "密码已修改，请使用新密码登录。"
+                if request.args.get("password_changed") == "1"
+                else None
+            ),
             username="",
             csrf_token=csrf_token(),
             next_path=request.args.get("next", ""),
@@ -654,6 +660,69 @@ def create_app(overrides: dict | None = None) -> Flask:
         session["authenticated_username"] = record.username
         destination = next_path if next_path.startswith("/") and not next_path.startswith("//") else "/"
         return redirect(destination)
+
+    def password_form_response(error: str | None = None, status: int = 200):
+        return render_template(
+            "auth.html",
+            mode="password",
+            error=error,
+            success=None,
+            csrf_token=csrf_token(),
+        ), status
+
+    def authenticated_record_for_password_change():
+        try:
+            record = auth_store.load()
+        except AuthStateError:
+            return None, _error("认证状态不可读取", "authentication_unavailable", 503)
+        if record is None:
+            return None, redirect("/auth/setup")
+        if session.get("authenticated_username") != record.username:
+            return None, redirect("/auth/login?next=/auth/password")
+        return record, None
+
+    @app.get("/auth/password")
+    def auth_password_form():
+        if not auth_enabled:
+            return _error("资源不存在", "not_found", 404)
+        _record, failure = authenticated_record_for_password_change()
+        if failure is not None:
+            return failure
+        return password_form_response()
+
+    @app.post("/auth/password")
+    def auth_password_submit():
+        if not auth_enabled:
+            return _error("资源不存在", "not_found", 404)
+        _record, failure = authenticated_record_for_password_change()
+        if failure is not None:
+            return failure
+        expected_csrf = session.get("csrf_token")
+        provided_csrf = request.form.get("csrf_token", "")
+        if (
+            not isinstance(expected_csrf, str)
+            or not hmac.compare_digest(expected_csrf, provided_csrf)
+        ):
+            return password_form_response("页面已过期，请重新提交。", 400)
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        if new_password != request.form.get("password_confirm", ""):
+            return password_form_response("两次输入的新密码不一致。", 400)
+        if not 8 <= len(new_password) <= 256:
+            return password_form_response("新密码需为 8–256 个字符。", 400)
+        try:
+            current_password_valid = auth_store.verify(_record.username, current_password)
+        except AuthStateError:
+            return password_form_response("密码无法更新，请稍后重试。", 503)
+        if not current_password_valid:
+            return password_form_response("当前密码错误。", 401)
+        try:
+            changed = auth_store.change_password(current_password, new_password)
+        except AuthStateError:
+            return password_form_response("密码无法更新，请稍后重试。", 503)
+        app.secret_key = changed.session_secret
+        session.clear()
+        return redirect("/auth/login?password_changed=1")
 
     @app.get("/api/auth/status")
     def auth_status():
@@ -794,6 +863,10 @@ def create_app(overrides: dict | None = None) -> Flask:
     @app.get("/")
     def index():
         return send_from_directory(WEBUI_DIR, "index.html")
+
+    @app.get("/favicon.png")
+    def favicon():
+        return send_file(FAVICON_PATH, mimetype="image/png")
 
     @app.get("/<path:filename>")
     def static_asset(filename):

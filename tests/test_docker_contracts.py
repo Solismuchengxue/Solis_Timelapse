@@ -62,6 +62,7 @@ class DockerContractTests(unittest.TestCase):
         self.assertIn("EXPOSE 9501", dockerfile)
         self.assertIn("HEALTHCHECK", dockerfile)
         self.assertIn("urllib.request", dockerfile)
+        self.assertIn("COPY assets/watchcow-icon-512.png assets/watchcow-icon-512.png", dockerfile)
         self.assertIn('ENTRYPOINT ["python", "docker/entrypoint.py"]', dockerfile)
         self.assertNotIn("curl", dockerfile)
         self.assertNotIn("wget", dockerfile)

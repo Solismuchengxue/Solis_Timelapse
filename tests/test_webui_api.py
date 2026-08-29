@@ -1239,6 +1239,14 @@ class WebUiAuthTests(unittest.TestCase):
             asset_response = self.client.get(asset)
             self.assertEqual(asset_response.status_code, 200)
             asset_response.close()
+        favicon = self.client.get("/favicon.png")
+        self.assertEqual(favicon.status_code, 200)
+        self.assertEqual(favicon.mimetype, "image/png")
+        self.assertEqual(
+            favicon.data,
+            (Path(__file__).resolve().parents[1] / "assets" / "watchcow-icon-512.png").read_bytes(),
+        )
+        favicon.close()
 
     def test_setup_creates_hashed_admin_record(self):
         csrf = self._csrf_from("/auth/setup")
@@ -1351,6 +1359,100 @@ class WebUiAuthTests(unittest.TestCase):
         self.assertTrue(response.headers["Location"].startswith("/auth/login"))
         self.assertEqual(self.client.get("/api/state").status_code, 401)
 
+    def test_password_change_requires_login_and_renders_current_and_new_password_fields(self):
+        self._setup_admin()
+        anonymous = self.app.test_client()
+
+        rejected = anonymous.get("/auth/password")
+        self.assertEqual(rejected.status_code, 302)
+        self.assertTrue(rejected.headers["Location"].startswith("/auth/login"))
+
+        form = self.client.get("/auth/password")
+        self.assertEqual(form.status_code, 200)
+        html = form.get_data(as_text=True)
+        for field in ("current_password", "new_password", "password_confirm", "csrf_token"):
+            self.assertIn(f'name="{field}"', html)
+        self.assertNotIn('name="username"', html)
+
+    def test_password_change_rejects_invalid_csrf_current_password_and_confirmation(self):
+        self._setup_admin()
+        auth_path = self.root / "config" / "auth.json"
+        original = auth_path.read_bytes()
+
+        missing_csrf = self.client.post("/auth/password", data={
+            "current_password": "correct horse battery",
+            "new_password": "replacement password",
+            "password_confirm": "replacement password",
+        })
+        self.assertEqual(missing_csrf.status_code, 400)
+        self.assertEqual(auth_path.read_bytes(), original)
+
+        csrf = self._csrf_from("/auth/password")
+        wrong_current = self.client.post("/auth/password", data={
+            "csrf_token": csrf,
+            "current_password": "wrong password",
+            "new_password": "replacement password",
+            "password_confirm": "replacement password",
+        })
+        self.assertEqual(wrong_current.status_code, 401)
+        self.assertIn("当前密码错误", wrong_current.get_data(as_text=True))
+        self.assertEqual(auth_path.read_bytes(), original)
+
+        csrf = self._csrf_from("/auth/password")
+        mismatch = self.client.post("/auth/password", data={
+            "csrf_token": csrf,
+            "current_password": "correct horse battery",
+            "new_password": "replacement password",
+            "password_confirm": "different replacement",
+        })
+        self.assertEqual(mismatch.status_code, 400)
+        self.assertIn("两次输入的新密码不一致", mismatch.get_data(as_text=True))
+        self.assertEqual(auth_path.read_bytes(), original)
+
+    def test_password_change_invalidates_all_sessions_and_requires_new_password(self):
+        self._setup_admin()
+        other = self.app.test_client()
+        csrf = self._csrf_from_with_client(other, "/auth/login")
+        login = other.post("/auth/login", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "correct horse battery",
+        })
+        self.assertEqual(login.status_code, 302)
+        other_index = other.get("/")
+        self.assertEqual(other_index.status_code, 200)
+        other_index.close()
+
+        csrf = self._csrf_from("/auth/password")
+        changed = self.client.post("/auth/password", data={
+            "csrf_token": csrf,
+            "current_password": "correct horse battery",
+            "new_password": "replacement password",
+            "password_confirm": "replacement password",
+        })
+
+        self.assertEqual(changed.status_code, 302)
+        self.assertEqual(changed.headers["Location"], "/auth/login?password_changed=1")
+        self.assertTrue(self.client.get("/").headers["Location"].startswith("/auth/login"))
+        self.assertTrue(other.get("/").headers["Location"].startswith("/auth/login"))
+
+        fresh = self.app.test_client()
+        csrf = self._csrf_from_with_client(fresh, "/auth/login")
+        old_password = fresh.post("/auth/login", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "correct horse battery",
+        })
+        self.assertEqual(old_password.status_code, 401)
+
+        csrf = self._csrf_from_with_client(fresh, "/auth/login")
+        new_password = fresh.post("/auth/login", data={
+            "csrf_token": csrf,
+            "username": "owner",
+            "password": "replacement password",
+        })
+        self.assertEqual(new_password.status_code, 302)
+
     def test_setup_cannot_replace_existing_admin(self):
         original_csrf = self._setup_admin()
         auth_path = self.root / "config" / "auth.json"
@@ -1404,10 +1506,12 @@ class WebUiAuthTests(unittest.TestCase):
             index = client.get("/")
             status = client.get("/api/auth/status")
             login = client.get("/auth/login")
+            password = client.get("/auth/password")
 
             self.assertEqual(index.status_code, 200)
             self.assertEqual(status.get_json(), {"enabled": False})
             self.assertEqual(login.status_code, 404)
+            self.assertEqual(password.status_code, 404)
             index.close()
         finally:
             app.extensions["timelapse_tasks"].shutdown()

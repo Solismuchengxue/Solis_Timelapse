@@ -92,6 +92,48 @@ class AuthStoreTests(unittest.TestCase):
                     AuthStore(candidate).initialize(username, password)
                 self.assertFalse(candidate.exists())
 
+    def test_change_password_replaces_hash_and_rotates_all_sessions(self):
+        store = AuthStore(self.path)
+        original = store.initialize("owner", "original password")
+
+        changed = store.change_password("original password", "replacement password")
+
+        self.assertEqual(changed.username, original.username)
+        self.assertEqual(changed.created_at, original.created_at)
+        self.assertNotEqual(changed.password_hash, original.password_hash)
+        self.assertNotEqual(changed.session_secret, original.session_secret)
+        self.assertFalse(store.verify("owner", "original password"))
+        self.assertTrue(store.verify("owner", "replacement password"))
+        self.assertNotIn("replacement password", self.path.read_text(encoding="utf-8"))
+
+    def test_change_password_rejects_invalid_credentials_without_mutating_record(self):
+        store = AuthStore(self.path)
+        store.initialize("owner", "original password")
+        original = self.path.read_bytes()
+
+        for current_password, new_password in (
+            ("wrong password", "replacement password"),
+            ("original password", "short"),
+            ("original password", "x" * 257),
+        ):
+            with self.subTest(current_password=current_password, new_length=len(new_password)):
+                with self.assertRaises(AuthStateError):
+                    store.change_password(current_password, new_password)
+                self.assertEqual(self.path.read_bytes(), original)
+                self.assertTrue(store.verify("owner", "original password"))
+
+    def test_change_password_write_failure_preserves_original_record(self):
+        store = AuthStore(self.path)
+        store.initialize("owner", "original password")
+        original = self.path.read_bytes()
+
+        with patch("src.auth.os.replace", side_effect=OSError("disk unavailable")):
+            with self.assertRaises(AuthStateError):
+                store.change_password("original password", "replacement password")
+
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertTrue(store.verify("owner", "original password"))
+
 
 if __name__ == "__main__":
     unittest.main()

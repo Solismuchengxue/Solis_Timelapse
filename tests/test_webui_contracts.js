@@ -46,7 +46,7 @@ for (const id of [
   "history-list", "delete-all-history-btn", "settings-form", "color-preset-list", "color-preset-form",
   "new-color-preset-btn", "delete-color-preset-btn", "preview-histogram", "chart-type-select",
   "hdr-send-btn", "hdr-form", "hdr-frame-list", "hdr-preview", "hdr-start-btn", "hdr-cancel-btn", "hdr-download-btn",
-  "logout-btn"
+  "change-password-btn", "logout-btn"
 ]) {
   assert(ids.includes(id), `Missing required element #${id}`);
   assert(js.includes(`byId("${id}")`) || js.includes(`#${id}`), `JavaScript does not bind #${id}`);
@@ -57,7 +57,7 @@ for (const route of [
   "/api/segments/split", "/api/segments/merge", "/api/segments/reorder",
   "/api/process", "/api/process/retry", "/api/tasks/cancel",
   "/api/tasks/current", "/api/logs", "/api/export", "/api/archive", "/api/history",
-  "/api/settings", "/api/color-presets", "/api/hdr", "/api/auth/status", "/auth/logout"
+  "/api/settings", "/api/color-presets", "/api/hdr", "/api/auth/status", "/auth/password", "/auth/logout"
 ]) {
   assert(js.includes(route), `Missing API route ${route}`);
 }

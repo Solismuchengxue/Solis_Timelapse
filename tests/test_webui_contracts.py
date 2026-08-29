@@ -35,6 +35,7 @@ class WebUiStaticContractTests(unittest.TestCase):
             self.assertIn(f'id="{required_id}"', self.html)
         self.assertIn('data-theme="system"', self.html)
         self.assertIn('src="/ui_prefs.js"', self.html)
+        self.assertIn('rel="icon" type="image/png" href="/favicon.png"', self.html)
         self.assertLess(self.html.index('/ui_prefs.js'), self.html.index('/app.js'))
         self.assertNotIn('id="open-settings-btn"', self.html)
         self.assertNotIn('id="theme-select"', self.html)
@@ -66,9 +67,19 @@ class WebUiStaticContractTests(unittest.TestCase):
             "hdr-send-btn", "hdr-form", "hdr-frame-list", "hdr-preview",
             "hdr-start-btn", "hdr-cancel-btn", "hdr-download-btn",
             "settings-render-device",
+            "change-password-btn", "logout-btn",
         }
         present = set(re.findall(r'\bid="([^"]+)"', self.html))
         self.assertEqual(set(), required_ids - present)
+
+    def test_container_authentication_exposes_password_change_and_shared_favicon(self):
+        auth_template = (ROOT / "webui" / "templates" / "auth.html").read_text(encoding="utf-8")
+        self.assertIn('rel="icon" type="image/png" href="/favicon.png"', auth_template)
+        self.assertIn('data-i18n="auth.change_password"', self.html)
+        self.assertIn('changePassword: "/auth/password"', self.js)
+        self.assertIn('window.location.assign(API.changePassword)', self.js)
+        self.assertIn('@app.get("/auth/password")', self.server)
+        self.assertIn('@app.post("/auth/password")', self.server)
 
     def test_five_named_views_and_accessible_controls_exist(self):
         for label in ("工作台", "HDR 合成", "归档与日志", "色彩配方", "设置"):

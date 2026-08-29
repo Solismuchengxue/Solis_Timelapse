@@ -1,7 +1,7 @@
 # Solis_Timelapse 设计总览
 
 - 状态：accepted
-- 最近核对：2026-08-11
+- 最近核对：2026-08-29
 
 ## 目标
 
@@ -63,7 +63,7 @@ flowchart LR
 ### 运行模式
 
 - **Windows 本地模式**：`run.bat` 管理本机虚拟环境并启动 WebUI，只监听 `127.0.0.1:9501`，保持免登录。
-- **fnOS 容器模式**：固定宿主机挂载，输入只读，使用 PUID/PGID 运行，并启用首次管理员初始化和会话登录。
+- **fnOS 容器模式**：固定宿主机挂载，输入只读，使用 PUID/PGID 运行，并启用首次管理员初始化、会话登录和登录后修改密码；修改密码会轮换会话密钥并使全部既有会话失效。
 - **镜像发布模式**：GitHub Actions 先执行 Python 测试，再构建并发布 `linux/amd64` GHCR 镜像；默认 Compose 固定到明确的 `sha-*` 标签。
 - **静态演示模式**：`demo/build_site.py` 白名单复制 `webui/` 的真实页面、样式和脚本，仅转换生成站点的相对资源路径并在应用脚本前注入 `demo/mock_api.js`；Mock 和合成媒体不属于生产运行时。
 
@@ -79,7 +79,7 @@ flowchart LR
 | 长任务、进度、日志与取消 | `src/task_manager.py` |
 | H.264/H.265 视频导出与编码回退 | `src/video_export.py` |
 | Manifest、源文件复制和完整性校验 | `src/archive.py` |
-| fnOS 应用内管理员认证 | `src/auth.py`、`webui/server.py` |
+| fnOS 应用内管理员认证、密码轮换与会话失效 | `src/auth.py`、`webui/server.py` |
 | 容器路径与启动前校验 | `src/runtime_env.py`、`docker/entrypoint.py` |
 | 自动化测试与镜像发布 | `tests/`、`.github/workflows/docker-publish.yml` |
 | WebUI 复用型静态演示与 Pages 发布 | `demo/`、`.github/workflows/pages.yml` |

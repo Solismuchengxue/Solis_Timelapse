@@ -13,7 +13,7 @@ from pathlib import Path
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
-_INITIALIZE_LOCK = threading.Lock()
+_AUTH_WRITE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ class AuthStore:
         username = username.strip()
         if not 1 <= len(username) <= 64 or not 8 <= len(password) <= 256:
             raise AuthStateError("invalid authentication setup")
-        with _INITIALIZE_LOCK:
+        with _AUTH_WRITE_LOCK:
             if self.path.exists():
                 raise AuthStateError("authentication is already initialized")
             record = AuthRecord(
@@ -80,19 +80,51 @@ class AuthStore:
                 session_secret=secrets.token_urlsafe(32),
                 created_at=datetime.now(UTC).isoformat(),
             )
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+            self._write(record)
+            return record
+
+    def change_password(self, current_password: str, new_password: str) -> AuthRecord:
+        if not isinstance(current_password, str) or not isinstance(new_password, str):
+            raise AuthStateError("invalid password change")
+        if not 8 <= len(new_password) <= 256:
+            raise AuthStateError("invalid password change")
+        with _AUTH_WRITE_LOCK:
+            record = self.load()
+            if record is None or not check_password_hash(record.password_hash, current_password):
+                raise AuthStateError("invalid password change")
+            changed = AuthRecord(
+                version=record.version,
+                username=record.username,
+                password_hash=generate_password_hash(new_password, method="scrypt"),
+                session_secret=secrets.token_urlsafe(32),
+                created_at=record.created_at,
+            )
+            try:
+                self._write(changed)
+            except OSError as exc:
+                raise AuthStateError("authentication state could not be updated") from exc
+            return changed
+
+    def _write(self, record: AuthRecord) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        try:
             with temporary.open("w", encoding="utf-8") as handle:
                 json.dump(asdict(record), handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+        except OSError:
             try:
-                self.path.chmod(0o600)
+                temporary.unlink(missing_ok=True)
             except OSError:
                 pass
-            return record
+            raise
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
 
     def verify(self, username: str, password: str) -> bool:
         record = self.load()

@@ -23,6 +23,7 @@ def transform_index(html: str) -> str:
     replacements = {
         'src="/ui_prefs.js"': 'src="./ui_prefs.js"',
         'href="/styles.css"': 'href="./styles.css"',
+        'href="/favicon.png"': 'href="./favicon.png"',
         'src="/app.js"': 'src="./app.js"',
     }
     for old, new in replacements.items():
@@ -48,6 +49,7 @@ def build_site(repo_root: Path, output_dir: Path) -> tuple[Path, ...]:
         encoding="utf-8",
     )
     copy2(root / "demo" / "mock_api.js", output / "mock_api.js")
+    copy2(root / "assets" / "watchcow-icon-512.png", output / "favicon.png")
     assets = root / "demo" / "assets"
     if assets.is_dir():
         copytree(assets, output / "assets")

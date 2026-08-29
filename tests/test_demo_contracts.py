@@ -25,7 +25,7 @@ class DemoBuildContractTests(unittest.TestCase):
             files = builder.build_site(ROOT, output)
             names = {path.as_posix() for path in files}
             self.assertTrue(
-                {"app.js", "index.html", "mock_api.js", "styles.css", "ui_prefs.js"}.issubset(names)
+                {"app.js", "favicon.png", "index.html", "mock_api.js", "styles.css", "ui_prefs.js"}.issubset(names)
             )
             for name in ("app.js", "styles.css", "ui_prefs.js"):
                 self.assertEqual(
@@ -37,6 +37,11 @@ class DemoBuildContractTests(unittest.TestCase):
             self.assertLess(html.index("./mock_api.js"), html.index("./ui_prefs.js"))
             self.assertLess(html.index("./mock_api.js"), html.index("./app.js"))
             self.assertNotIn('src="/app.js"', html)
+            self.assertIn('rel="icon" type="image/png" href="./favicon.png"', html)
+            self.assertEqual(
+                sha256((output / "favicon.png").read_bytes()).digest(),
+                sha256((ROOT / "assets" / "watchcow-icon-512.png").read_bytes()).digest(),
+            )
 
     def test_build_rejects_protected_output_paths(self):
         builder = load_builder()

@@ -139,7 +139,7 @@ docker compose up -d
 docker compose ps
 ```
 
-Open `http://DOCKER-HOST:9501/`. The first visit displays the administrator setup page; later visits require a login.
+Open `http://DOCKER-HOST:9501/`. The first visit displays the administrator setup page; later visits require a login. After signing in, use **Change password** in the upper-right corner. The current password is required, and a successful change invalidates every existing session and requires a new login.
 
 To reset a forgotten password on a trusted Docker host, back up and remove `/srv/solis_timelapse/config/auth.json`:
 
@@ -155,6 +155,7 @@ docker compose restart
 - Final export exposes frame rate, resolution, codec, quality, task status, and progress.
 - `Settings → Processing → RAW/JPEG render device` supports automatic, CPU, and GPU selection; the selected device, worker count, and encoder are recorded in task logs.
 - Themes include light, dark, and system; the interface can switch between Chinese and English immediately.
+- The workbench, authentication pages, and live static demo share the project icon as their browser-tab icon.
 - Use `INFO` for normal operation and `DEBUG` when frame-level progress, parameters, or stack traces are required.
 
 ### HDR Composition

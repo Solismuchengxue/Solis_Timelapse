@@ -31,6 +31,7 @@ const API = Object.freeze({
   colorPresets: "/api/color-presets",
   colorPreset: (id) => `/api/color-presets/${encodeURIComponent(id)}`,
   authStatus: "/api/auth/status",
+  changePassword: "/auth/password",
   logout: "/auth/logout"
 });
 
@@ -72,9 +73,14 @@ const state = {
 
 async function configureAuthentication() {
   const auth = await api(API.authStatus);
-  const button = byId("logout-btn");
-  button.hidden = !auth.enabled;
-  button.dataset.csrfToken = auth.csrf_token || "";
+  byId("change-password-btn").hidden = !auth.enabled;
+  const logoutButton = byId("logout-btn");
+  logoutButton.hidden = !auth.enabled;
+  logoutButton.dataset.csrfToken = auth.csrf_token || "";
+}
+
+function changePassword() {
+  window.location.assign(API.changePassword);
 }
 
 function logout() {
@@ -2260,6 +2266,7 @@ function bindEvents() {
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
   byId("app").querySelector('[role="tablist"]').addEventListener("keydown", handleTabKeydown);
   byId("dismiss-error-btn").addEventListener("click", clearError);
+  byId("change-password-btn").addEventListener("click", changePassword);
   byId("logout-btn").addEventListener("click", logout);
   byId("pick-source-btn").addEventListener("click", pickDirectory);
   byId("scan-btn").addEventListener("click", scanSource);
