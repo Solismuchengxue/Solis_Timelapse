@@ -4,12 +4,15 @@ LABEL org.opencontainers.image.source="https://github.com/Solismuchengxue/Solis_
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    SOLIS_CONTAINER=1
+    SOLIS_CONTAINER=1 \
+    IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 ffmpeg \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q hevc_nvenc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
