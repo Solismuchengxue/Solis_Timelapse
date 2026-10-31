@@ -117,7 +117,7 @@ Closing the launcher window stops the WebUI. Windows local mode remains unauthen
 Deploy the GHCR image produced by GitHub Actions without building the repository on the Docker host:
 
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766
+ghcr.io/solismuchengxue/solis_timelapse:sha-190e628
 ```
 
 Prepare `/srv/solis_timelapse`, place `compose.yaml` and `.env` there, and create the persistent `workspace`, `output`, `archive`, and `config` directories. `.env` must include:
@@ -192,6 +192,7 @@ Processed JPEG frames and low-bitrate preview videos are not treated as final ar
 
 ## Current Limitations and Security Boundary
 
+- Compose requests one NVIDIA GPU and requires the host driver and NVIDIA Container Toolkit. The image supplies system FFmpeg with H.264/H.265 NVENC and CPU fallback. For CPU-only hosts, remove `deploy.resources.reservations.devices` and `NVIDIA_DRIVER_CAPABILITIES`. OpenCL photo rendering is an independent optional capability; use automatic or CPU mode when unavailable. See the [acceptance record](docs/verification.md).
 - GitHub Actions currently builds `linux/amd64` only; ARM64 has not been validated.
 - Docker publishes port `9501` over plain HTTP; keep it on a trusted network and do not expose it directly to the public internet.
 - Application login does not replace HTTPS, host permissions, network access control, or backups.

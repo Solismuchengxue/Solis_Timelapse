@@ -126,6 +126,31 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 
 在补充对应证据前，README 和其他项目介绍不得把这些内容表述为现有能力。
 
+## 2026-10-31 fnOS GPU 接入验收
+
+- 范围：只重建 `solis_timelapse`，使用 `docker compose up -d --no-deps --no-build --pull never solis_timelapse`，未拉取或升级镜像。镜像 ID 始终为 `sha256:97f121bd561ee4ba7a0953cc486cba920c52daad115e67c42d97c6cd02e64593`，OCI revision 为 `6f4a7666951a6a0d678682c6ddc99238ed26d7af`。
+- 变更前任务状态为 `completed`；实际容器 User 为空、PID1 为 root、输入 RW、restart 为 `always`、GPU 请求为空。NAS 与本机 Compose 却要求 `1000:1000`、输入 RO、`unless-stopped`。只能确认配置与运行态漂移；现有标签不足以确认责任操作或时间。
+- 配置层：本机与 NAS Compose 新增一张 NVIDIA GPU 的标准设备请求和 `compute,utility,video`；目标 Compose 解析通过。没有改主机驱动或其他容器。
+- 容器层：`Config.User=1000:1000`，`/proc/1/status` UID/GID 均为 1000，输入 Mounts.RW=false，restart=`unless-stopped`；DeviceRequests 为 nvidia/count=1/capabilities=[[gpu]]；P4 与驱动 580.142 可见，NVIDIA 设备节点及编码驱动库可用。
+- 健康与访问控制：容器 healthy，`/api/health` 为 200，匿名 `/api/project` 为 401。
+- 持久化：重建前后 workspace/output/archive/config 的文件数和字节数分别保持 `282/2269455`、`0/0`、`0/0`、`2/1089`；认证和配置内容的 SHA-256 相等，仅比较摘要，未输出凭据正文；挂载来源与目标均相同。未遍历真实照片或对原片写入。
+- 硬件编码层：应用选择的 FFmpeg 为 imageio-ffmpeg `ffmpeg-linux-x86_64-v7.0.2`，编码器列表无 NVENC。分别用 `testsrc2` 640×360、24 帧请求 `h264_nvenc`/`hevc_nvenc`，均以退出码 8 和 `Unknown encoder` 失败；容器内无系统 FFmpeg。
+- 应用路径：在容器临时目录生成 24 张 640×360 合成 JPEG，直接调用镜像内 `src.video_export.export_video`，请求 NVENC。H.264 实际选 `libx264`，产物 8005 字节；H.265 实际选 `libx265`，产物 11055 字节。CPU 回退通过，应用 GPU 编码未通过；没有通过 WebUI 发起真实业务任务，也没有修改保存的导出设置。
+- 飞牛 UI 开关未直接核验；DeviceRequests 及编码证据不替代 UI 状态。OpenCL 照片处理未验证。临时样本由测试上下文正常回收，未写入业务输出目录。
+- 后续：需授权在镜像中提供带 NVENC 的 FFmpeg 并发布、部署后重验。设备接入成功不应表述成硬件编码已可用。
+
+## 2026-11-01 NVENC 修复与收尾
+
+- 发布源码 `190e62890d93cf8b13143e1676878b16a0f54343`，固定镜像 `sha-190e628`；现场 image ID `sha256:4d62c76574142065fff64049ab1084258d6f4410739d2a5490356ef88d43cabd`，RepoDigest `sha256:c74dcb3c4c5b282289e1c553179ceab2df53f7f47e3de091e1223269874c029e`。Docker CI `41221500534`、Pages CI `41221500506` 成功。
+- Dockerfile 安装系统 FFmpeg，通过 `IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg` 使用版本 7.1.5-0+deb13u1；构建检查两个 NVENC 编码器。未改宿主驱动或 Toolkit，没有业务 Schema 变更。
+- 空闲后仅更新目标服务；PID/用户 `1000:1000`，输入 RO，restart unless-stopped，nvidia/count=1/gpu，healthy。认证、配置摘要与四个持久目录计数/字节均与更新前相同。原镜像及 `compose.rollback-20261101.yaml` 保留；未实际执行回滚，恢复仍需核对数据及功能。
+- 容器内应用真实 `export_video` 调用，24 张 640×360 合成 JPEG：H.264 NVENC 选 `h264_nvenc`、6297 字节，H.265 NVENC 选 `hevc_nvenc`、4394 字节；显式 CPU 分别选 libx264/libx265、5880/9941 字节，四个产物均经 FFmpeg 解码成功。另用临时包装器模拟 NVENC 子进程失败，应用从 h264_nvenc 自动回退 libx264 成功，5880 字节。
+- 新镜像内运行仓库的 2 项端到端测试：临时合成照片经过扫描、分析、渲染、视频导出、归档，逐阶段原片摘要不变，通过；仅测试进程使用隔离临时目录和本地模式，不改变生产服务配置或任务。全部临时产物正常回收。
+- 本地 258 项 Python 测试、compileall、3 项 JS 语法、2 项 Node 契约通过；另认证/API/文档相关 141 项通过。无真实密码读取或变更，部署后健康 200、匿名业务 API 401、改密页跳登录，页面入口源码与合成认证页面测试通过。用户实际改密是可选操作，不作为软件阻塞。
+- OpenCL 实测 `(False, OpenCL unavailable)`。它是独立的条件照片 GPU 渲染能力，原有自动 CPU 回退和显式 GPU 不可用报错保持；视频 NVENC 不依赖它，不适用为本次视频接入准入条件。未增加宿主 OpenCL 组件，也不宣称 OpenCL 渲染已通过。
+- 旧 Pages `33241296392` 注释确认 Node20 告警存在；已使用官方 configure-pages v6、upload-pages-artifact v5、deploy-pages v5。新版运行检查注释只有 runner 镜像迁移提示，没有 Node20 弃用告警。
+- 飞牛复选框仍为 NOT_VERIFIED：Computer Use 在观察浏览器时因无法可靠识别当前 URL 而停止本轮界面操作，未重试或绕过。实际 DeviceRequests 与容器硬件编码均已通过；此项仅剩人工查看界面，不能据 SSH 结果宣称 UI 勾选实测。
+
 ## 8. 更新触发条件
 
 测试数量、标准命令、部署镜像、平台架构、运行时验收或安全边界变化时更新本文件。任何“已通过”结论必须同时记录实际命令、时间点和输出摘要。

@@ -11,10 +11,10 @@
 项目只通过 GitHub Actions 构建并发布 AMD64 镜像。fnOS 只拉取已发布的 GHCR 镜像，不在 NAS 上本地构建：
 
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766
+ghcr.io/solismuchengxue/solis_timelapse:sha-190e628
 ```
 
-不要从 Docker Hub 下载同名第三方镜像。Compose 固定到 `sha-6f4a766`，不会自动漂移到后续构建。镜像由公开仓库的 `Dockerfile` 构建，可以在 GitHub Actions 和 Packages 页面核对来源。
+不要从 Docker Hub 下载同名第三方镜像。Compose 固定到 `sha-190e628`，不会自动漂移到后续构建。镜像由公开仓库的 `Dockerfile` 构建，可以在 GitHub Actions 和 Packages 页面核对来源。
 
 当前 Package 为 Public，可以匿名拉取。自行 Fork 并发布新镜像时，需要在对应 GitHub Packages 设置中确认可见性。
 
@@ -91,13 +91,21 @@ name: solis_timelapse
 
 services:
   solis_timelapse:
-    image: ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766
+    image: ghcr.io/solismuchengxue/solis_timelapse:sha-190e628
     pull_policy: always
     container_name: solis_timelapse
     user: "${PUID:?请在 .env 中设置飞牛用户 UID}:${PGID:?请在 .env 中设置飞牛用户 GID}"
     environment:
       SOLIS_CONTAINER: "1"
       PYTHONUNBUFFERED: "1"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     ports:
       - "9501:9501"
     volumes:
@@ -220,7 +228,19 @@ docker compose up -d --force-recreate
 
 ### 没有 NVIDIA GPU 能否运行
 
-可以。默认 Compose 不要求 GPU，照片处理和视频编码可以使用 CPU。容器 NVENC 还需要宿主机 NVIDIA 驱动、NVIDIA Container Toolkit 和额外 GPU 暴露配置；默认 Compose 不包含这些配置。
+可以。当前 Compose 请求一张 NVIDIA GPU；CPU-only 主机需要移除 `deploy.resources.reservations.devices` 及 `NVIDIA_DRIVER_CAPABILITIES`。照片处理和视频编码仍有 CPU 路径。
+
+### NVIDIA GPU 接入与验收
+
+已有 NVIDIA 主机使用官方驱动和 NVIDIA Container Toolkit；无需恢复旧 vGPU/NVENC 接入方案。Compose 的 `driver: nvidia`、`count: 1`、`capabilities: [gpu]` 负责设备请求，`NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 负责驱动库（包括编码库）注入。配置依据 [Docker GPU 文档](https://docs.docker.com/compose/how-tos/gpu-support/) 和 [NVIDIA 驱动能力说明](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html)。GPU 请求不会自动安装 FFmpeg 编码器。
+
+2026-10-31 通过 SSH 使用原镜像重建后，P4、驱动 580.142、设备节点和 `libnvidia-encode.so.1` 可见；运行用户为 `1000:1000`，原片挂载只读，重启策略为 `unless-stopped`。飞牛 UI 的“启用显卡支持”复选框本轮未直接核验，设备接入证据来自 Docker DeviceRequests 和容器内检测，不宣称已在 UI 勾选。
+
+2026-10-31 的旧镜像缺少 NVENC 编码器，历史合成导出只能使用 CPU。当前固定镜像 `sha-190e628` 安装系统 FFmpeg，并设置 `IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg`；导出设置 `auto`/`nvenc` 会优先尝试 NVENC，失败自动回退 CPU，`off` 显式使用 CPU。OpenCL 照片渲染是独立可选能力，不是视频 NVENC 前提；保留自动检测、CPU 回退和显式 GPU 不可用时报错的原有契约，不安装宿主机 OpenCL 组件来解决视频编码问题。
+
+本轮回退配置保留在应用根目录 `compose.rollback-20261101.yaml`，原镜像 `sha-6f4a766` 保留本机标签。必要时在同一目录使用 `docker compose -p solis_timelapse -f compose.rollback-20261101.yaml up -d --no-deps --pull never solis_timelapse`，随后复核用户、输入 RO、认证、持久化状态及核心功能。旧镜像不提供 NVENC；本次没有改变业务 Schema，换回镜像也必须核对实际数据和功能，不能仅看容器启动。
+
+检查时先确认无活动任务，再核对 `docker inspect solis_timelapse` 中的 User、DeviceRequests、输入 Mounts.RW 与 RestartPolicy；不要完整输出环境变量或认证文件。正常运行日志通过 `docker compose logs --tail=100 solis_timelapse` 查看，Docker 日志轮转本轮未核验；应用任务日志保存在 `workspace/task.json`，默认当前任务 200 条、历史 2000 条，持续增长风险仍需关注 Docker 日志。应用日志可在空闲时通过 WebUI 日志页手动清除，不手工截断使用中的 Docker 日志文件。
 
 ## 13. 网络安全
 

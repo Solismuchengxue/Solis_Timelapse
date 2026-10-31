@@ -62,6 +62,7 @@ flowchart LR
 
 ### 运行模式
 
+- **NVIDIA 接入**：Compose 请求一张 GPU，驱动能力为 `compute,utility,video`。镜像通过 `IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg` 使用带 NVENC 的系统 FFmpeg；NVENC 失败回退 CPU。OpenCL 为独立可选照片处理能力，不是 NVENC 依赖。现场证据见 [验收记录](docs/verification.md)。
 - **Windows 本地模式**：`run.bat` 管理本机虚拟环境并启动 WebUI，只监听 `127.0.0.1:9501`，保持免登录。
 - **fnOS 容器模式**：固定宿主机挂载，输入只读，使用 PUID/PGID 运行，并启用首次管理员初始化、会话登录和登录后修改密码；修改密码会轮换会话密钥并使全部既有会话失效。
 - **镜像发布模式**：GitHub Actions 先执行 Python 测试，再构建并发布 `linux/amd64` GHCR 镜像；默认 Compose 固定到明确的 `sha-*` 标签。

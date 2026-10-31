@@ -603,7 +603,7 @@ class WebUiStaticContractTests(unittest.TestCase):
             "https://solismuchengxue.github.io/Solis_Timelapse/",
             "docker compose", "INPUT_PATH", "APP_ROOT", "/media/input:ro",
             "PUID", "PGID", "/srv/solis_timelapse", "DOCKER-HOST",
-            "ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766",
+            "ghcr.io/solismuchengxue/solis_timelapse:sha-190e628",
             "docs/architecture.md", "docs/verification.md",
         ):
             with self.subTest(token=token):

@@ -116,8 +116,10 @@ flowchart LR
 
 部署时直接使用 GitHub Actions 发布的 GHCR 镜像，不需要在 Docker 主机上构建源码：
 
+当前 Compose 请求一张 NVIDIA GPU，宿主机需配置官方驱动和 NVIDIA Container Toolkit。镜像提供带 NVENC 的系统 FFmpeg，导出可自动使用 H.264/H.265 硬件编码，失败回退 CPU。CPU-only 主机需移除 `deploy.resources.reservations.devices` 和 `NVIDIA_DRIVER_CAPABILITIES`。照片 OpenCL 渲染是独立的可选能力，不是 NVENC 前提；不可用时选择自动或 CPU。详情见 [验收记录](docs/verification.md)。
+
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:sha-6f4a766
+ghcr.io/solismuchengxue/solis_timelapse:sha-190e628
 ```
 
 准备 `/srv/solis_timelapse`，放入仓库的 `compose.yaml` 和 `.env`，并创建 `workspace`、`output`、`archive`、`config` 四个持久化目录。`.env` 至少包含：

@@ -104,6 +104,7 @@ flowchart TB
 
 ### 视频交付
 
+Compose 声明一张 NVIDIA GPU 及 `compute,utility,video`。镜像安装系统 FFmpeg，并通过 imageio-ffmpeg 支持的 `IMAGEIO_FFMPEG_EXE` 覆盖其默认二进制；构建时检查 H.264/H.265 NVENC 编码器存在。设备、编码器和应用选择分层验收，历史缺失与修复证据见 verification。RAW 解码仍为 CPU；OpenCL 照片渲染为独立可选能力，自动模式在不可用时使用 CPU，显式 GPU 请求则明确报错，不因 NVENC 修复删减该契约。
 `src/video_export.py` 通过 imageio-ffmpeg 定位 FFmpeg，生成 H.264/H.265 MP4。导出前验证帧和编码参数；NVENC 可用时优先使用硬件编码，初始化或执行失败时回退 CPU 编码。视频写入临时路径，成功后才替换正式输出。
 
 ### 归档交付
