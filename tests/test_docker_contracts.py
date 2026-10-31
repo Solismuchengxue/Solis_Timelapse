@@ -37,6 +37,10 @@ class DockerContractTests(unittest.TestCase):
         self.assertNotIn("privileged", service)
         self.assertNotIn("/var/run/docker.sock", "\n".join(volumes))
         self.assertEqual(service["restart"], "unless-stopped")
+        self.assertEqual(service["environment"]["NVIDIA_DRIVER_CAPABILITIES"], "compute,utility,video")
+        self.assertEqual(service["deploy"]["resources"]["reservations"]["devices"], [
+            {"driver": "nvidia", "count": 1, "capabilities": ["gpu"]},
+        ])
 
     def test_deployment_has_no_local_build_compose(self):
         self.assertFalse((ROOT / "compose.build.yaml").exists())
@@ -59,6 +63,10 @@ class DockerContractTests(unittest.TestCase):
 
         self.assertTrue(dockerfile.startswith("FROM python:3.12-slim\n"))
         self.assertIn("SOLIS_CONTAINER=1", dockerfile)
+        self.assertIn("IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg", dockerfile)
+        self.assertIn("libgomp1 ffmpeg", dockerfile)
+        self.assertIn("grep -q h264_nvenc", dockerfile)
+        self.assertIn("grep -q hevc_nvenc", dockerfile)
         self.assertIn("EXPOSE 9501", dockerfile)
         self.assertIn("HEALTHCHECK", dockerfile)
         self.assertIn("urllib.request", dockerfile)

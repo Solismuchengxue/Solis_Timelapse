@@ -87,8 +87,8 @@ class DemoBuildContractTests(unittest.TestCase):
             "python demo/build_site.py --output .demo-site",
             "python -m unittest tests.test_demo_contracts",
             "path: .demo-site", "environment:", "name: github-pages",
-            "actions/checkout@v6", "actions/configure-pages@v5",
-            "actions/upload-pages-artifact@v4", "actions/deploy-pages@v4",
+            "actions/checkout@v6", "actions/configure-pages@v6",
+            "actions/upload-pages-artifact@v5", "actions/deploy-pages@v5",
         ):
             self.assertIn(token, workflow)
         self.assertNotIn("path: .\n", workflow)

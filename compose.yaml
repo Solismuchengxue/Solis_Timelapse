@@ -9,6 +9,14 @@ services:
     environment:
       SOLIS_CONTAINER: "1"
       PYTHONUNBUFFERED: "1"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     ports:
       - "9501:9501"
     volumes:
