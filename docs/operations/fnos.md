@@ -11,10 +11,10 @@
 项目只通过 GitHub Actions 构建并发布 AMD64 镜像。fnOS 只拉取已发布的 GHCR 镜像，不在 NAS 上本地构建：
 
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:sha-190e628
+ghcr.io/solismuchengxue/solis_timelapse:sha-0471a8b
 ```
 
-不要从 Docker Hub 下载同名第三方镜像。Compose 固定到 `sha-190e628`，不会自动漂移到后续构建。镜像由公开仓库的 `Dockerfile` 构建，可以在 GitHub Actions 和 Packages 页面核对来源。
+不要从 Docker Hub 下载同名第三方镜像。Compose 固定到 `sha-0471a8b`，不会自动漂移到后续构建。镜像由公开仓库的 `Dockerfile` 构建，可以在 GitHub Actions 和 Packages 页面核对来源。
 
 当前 Package 为 Public，可以匿名拉取。自行 Fork 并发布新镜像时，需要在对应 GitHub Packages 设置中确认可见性。
 
@@ -91,7 +91,7 @@ name: solis_timelapse
 
 services:
   solis_timelapse:
-    image: ghcr.io/solismuchengxue/solis_timelapse:sha-190e628
+    image: ghcr.io/solismuchengxue/solis_timelapse:sha-0471a8b
     pull_policy: always
     container_name: solis_timelapse
     user: "${PUID:?请在 .env 中设置飞牛用户 UID}:${PGID:?请在 .env 中设置飞牛用户 GID}"
@@ -236,7 +236,7 @@ docker compose up -d --force-recreate
 
 2026-10-31 通过 SSH 使用原镜像重建后，P4、驱动 580.142、设备节点和 `libnvidia-encode.so.1` 可见；运行用户为 `1000:1000`，原片挂载只读，重启策略为 `unless-stopped`。飞牛 UI 的“启用显卡支持”复选框本轮未直接核验，设备接入证据来自 Docker DeviceRequests 和容器内检测，不宣称已在 UI 勾选。
 
-2026-10-31 的旧镜像缺少 NVENC 编码器，历史合成导出只能使用 CPU。当前固定镜像 `sha-190e628` 安装系统 FFmpeg，并设置 `IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg`；导出设置 `auto`/`nvenc` 会优先尝试 NVENC，失败自动回退 CPU，`off` 显式使用 CPU。OpenCL 照片渲染是独立可选能力，不是视频 NVENC 前提；保留自动检测、CPU 回退和显式 GPU 不可用时报错的原有契约，不安装宿主机 OpenCL 组件来解决视频编码问题。
+2026-10-31 的旧镜像缺少 NVENC 编码器，历史合成导出只能使用 CPU。当前固定镜像 `sha-0471a8b` 安装系统 FFmpeg，并设置 `IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg`；导出设置 `auto`/`nvenc` 会优先尝试 NVENC，失败自动回退 CPU，`off` 显式使用 CPU。OpenCL 照片渲染是独立可选能力，不是视频 NVENC 前提；保留自动检测、CPU 回退和显式 GPU 不可用时报错的原有契约，不安装宿主机 OpenCL 组件来解决视频编码问题。
 
 本轮回退配置保留在应用根目录 `compose.rollback-20261101.yaml`，原镜像 `sha-6f4a766` 保留本机标签。必要时在同一目录使用 `docker compose -p solis_timelapse -f compose.rollback-20261101.yaml up -d --no-deps --pull never solis_timelapse`，随后复核用户、输入 RO、认证、持久化状态及核心功能。旧镜像不提供 NVENC；本次没有改变业务 Schema，换回镜像也必须核对实际数据和功能，不能仅看容器启动。
 
@@ -249,6 +249,8 @@ fnOS 的 `9501` 仍是明文 HTTP，只适合可信局域网。不要直接暴�
 需要远程访问时，应在项目外使用可信反向代理、HTTPS 和额外访问控制。本项目当前不提供这些基础设施配置。
 
 ## 14. 最小验收清单
+
+2026-11-01 暖白 Logo 更新固定到 `sha-0471a8b`，网页与 favicon 已核验。此次回退文件为 `compose.rollback-logo-20261101.yaml`，对应旧 NVENC 镜像 `sha-190e628`；回退步骤同前述方式替换配置文件名，继续复核数据、认证与 GPU 功能。浏览器缓存旧图标时可强制刷新页面。
 
 - `docker compose config` 能正确展开路径、UID/GID 和固定镜像。
 - 容器状态为 healthy。

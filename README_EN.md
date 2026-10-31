@@ -117,7 +117,7 @@ Closing the launcher window stops the WebUI. Windows local mode remains unauthen
 Deploy the GHCR image produced by GitHub Actions without building the repository on the Docker host:
 
 ```text
-ghcr.io/solismuchengxue/solis_timelapse:sha-190e628
+ghcr.io/solismuchengxue/solis_timelapse:sha-0471a8b
 ```
 
 Prepare `/srv/solis_timelapse`, place `compose.yaml` and `.env` there, and create the persistent `workspace`, `output`, `archive`, and `config` directories. `.env` must include:

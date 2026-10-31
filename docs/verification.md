@@ -153,6 +153,14 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 
 后续用户于 2026-11-01 提供 solis_timelapse 详情设置页截图，并明确确认“已经开启了”。截图中“启用显卡支持”已勾选；UI 展示核验据此关闭，证据类型为用户确认及截图，而非 Agent 自动点击或直接操作。
 
+## 2026-11-01 暖白 Logo 发布
+
+- 用户选定暖白底、金色快门与石墨灰时间轨迹 Logo，更新 `assets/watchcow-icon.png` 原图及 `assets/watchcow-icon-512.png`，README、WebUI/认证 favicon 与静态演示沿用同一图标来源。增加图标资产变更触发 Docker 发布的路径规则。
+- 发布源码 `0471a8b6401ba0dfd1c89b50eb94e61511e85410`；Docker CI `41223688170`、Pages CI `41223688209` 均成功。固定镜像 `sha-0471a8b`，现场 image ID 为 `sha256:cefdb62f29e79513bfba1ef2672d432f95ce1bdc9676d4f45ac70fdfeb20f58f`。
+- 本地 66 项相关契约测试、静态站点构建及 diff 检查通过；本地、构建站点、线上 Pages 和 fnOS HTTP `/favicon.png` 的 SHA-256 均为 `b6ba9c89e75d7e9273004d4ad437e71d35d6e12578df8bdc059a732423b924de`。线上图标返回 200。
+- 空闲后仅重建 Timelapse。输入只读、用户 1000:1000、GPU 请求、挂载来源/目标及 unless-stopped 均保持；四目录计数/字节和认证/配置摘要相等。healthy、健康 200、匿名业务 API 401；合成 24 帧调用应用导出，H.264/H.265 实际编码器仍为 h264_nvenc/hevc_nvenc，产物为 6297/4394 字节。
+- 原 NVENC 镜像和 `compose.rollback-logo-20261101.yaml` 保留以供回退；未改变数据 Schema，未执行回滚。图标源图保留生成原件；本轮自建转换/部署脚本与合成样本回收。浏览器或桌面快捷方式若缓存旧图标，需要刷新或重新获取图标；没有直接操作飞牛 Docker 列表或桌面快捷方式的独立图标缓存。
+
 ## 8. 更新触发条件
 
 测试数量、标准命令、部署镜像、平台架构、运行时验收或安全边界变化时更新本文件。任何“已通过”结论必须同时记录实际命令、时间点和输出摘要。
