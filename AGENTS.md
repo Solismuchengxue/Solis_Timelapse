@@ -45,3 +45,9 @@ git diff --check
 ```
 
 文档或迁移边界变更至少检查最终 diff、`git diff --check`、中英文入口与相关 Markdown 路径、`git check-ignore -v` 和 `git status`，并确认 `TODO.md`、`DEVLOG.md`、`PLAYBOOK.md`、运行数据、敏感配置与真实媒体均未进入暂存区。
+
+## 项目角色治理
+
+- 当前项目只保留一个负责人 L1；旧固定审查者已退役。
+- 独立审查仅在用户、部长或项目规则明确要求时按需建立。
+- 本次角色调整不自动授予 Git 提交或推送、发布或部署、运行态、凭据、费用或删除权限。
