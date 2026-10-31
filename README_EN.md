@@ -155,7 +155,7 @@ docker compose restart
 - Final export exposes frame rate, resolution, codec, quality, task status, and progress.
 - `Settings → Processing → RAW/JPEG render device` supports automatic, CPU, and GPU selection; the selected device, worker count, and encoder are recorded in task logs.
 - Themes include light, dark, and system; the interface can switch between Chinese and English immediately.
-- The workbench, authentication pages, and live static demo share the project icon as their browser-tab icon.
+- The workbench, authentication pages, and live static demo share a warm-white logo with a golden aperture and graphite time orbit as their browser-tab icon.
 - Use `INFO` for normal operation and `DEBUG` when frame-level progress, parameters, or stack traces are required.
 
 ### HDR Composition

@@ -11,6 +11,7 @@ on:
       - "Dockerfile"
       - "requirements.txt"
       - "config/config.yaml"
+      - "assets/watchcow-icon-512.png"
       - "docker/**"
       - "src/**"
       - "webui/**"

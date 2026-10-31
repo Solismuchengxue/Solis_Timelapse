@@ -151,6 +151,8 @@ git check-ignore -v TODO.md DEVLOG.md PLAYBOOK.md config/local.yaml config/auth.
 - 旧 Pages `33241296392` 注释确认 Node20 告警存在；已使用官方 configure-pages v6、upload-pages-artifact v5、deploy-pages v5。新版运行检查注释只有 runner 镜像迁移提示，没有 Node20 弃用告警。
 - 飞牛复选框仍为 NOT_VERIFIED：Computer Use 在观察浏览器时因无法可靠识别当前 URL 而停止本轮界面操作，未重试或绕过。实际 DeviceRequests 与容器硬件编码均已通过；此项仅剩人工查看界面，不能据 SSH 结果宣称 UI 勾选实测。
 
+后续用户于 2026-11-01 提供 solis_timelapse 详情设置页截图，并明确确认“已经开启了”。截图中“启用显卡支持”已勾选；UI 展示核验据此关闭，证据类型为用户确认及截图，而非 Agent 自动点击或直接操作。
+
 ## 8. 更新触发条件
 
 测试数量、标准命令、部署镜像、平台架构、运行时验收或安全边界变化时更新本文件。任何“已通过”结论必须同时记录实际命令、时间点和输出摘要。
